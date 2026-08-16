@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import traceback
+
+import discord
+from discord import app_commands
+from config import settings
+from discord.ext import commands
+
+from database import init_db
+
+logger = logging.getLogger("scrim-bot")
+
+ACTIVITY_ROTATION = [
+    ("watching", "Vortex BuildNow Competitive Server"),
+    ("playing", "Vortex scrims with daddy #Chris"),
+    ("watching", "Vortex BuildNow tournaments"),
+    ("competing", "Cups for the Best PR of the server"),
+    ("watching", "Vortex qualifiers with #Chris"),
+    ("playing", "Vortex Scrims"),
+    ("listening", "to #Chris's instructions"),
+    ("watching", "the Vortex leaderboard"),
+    ("playing", "Vortex Competitive Cups"),
+]
+
+ACTIVITY_TYPES = {
+    "playing": discord.ActivityType.playing,
+    "watching": discord.ActivityType.watching,
+    "listening": discord.ActivityType.listening,
+    "competing": discord.ActivityType.competing,
+}
+
+COMMAND_SYNTAX = {
+    "create-event": "`;create-event <name> <#channel> <#signup_channel> [region] [format] [start_time] [team_size] [total_games] [max_players] [point_kill] [point_win]`",
+    "create-scrim": "`;create-scrim <#channel> <#signup_channel> [region] [format] [team_size] [match_count] [base_pr_kill] [base_pr_win]`",
+    "start-event": "`;start-event <event_id> <room_code>`",
+    "start-scrim": "`;start-scrim <event_id> <room_code>`",
+    "start-game": "`;start-game <event_id> <game_number> [room_code]`",
+    "end-game": "`;end-game <event_id> <game_number> [first] [second] [third]`",
+    "create-session": "`;create-session <event_id>`",
+    "start-session": "`;start-session <event_id> [room_code]`",
+    "end-session": "`;end-session <event_id>`",
+    "end-event": "`;end-event <event_id>`",
+    "end-scrim": "`;end-scrim <event_id>`",
+    "dm-players": "`;dm-players <event_id> <room_code> [game_number] [start_time]`",
+    "open-registration": "`;open-registration <event_id>`",
+    "close-registration": "`;close-registration <event_id>`",
+    "reopen-registration": "`;reopen-registration <event_id>`",
+    "event-status": "`;event-status <event_id> <setup|registration|in_progress|completed>`",
+    "event-settings": "`;event-settings <event_id> [team_size] [max_players] [total_games] [point_kill] [point_win] [region] [event_format]`",
+    "add-team": "`;add-team <event_id> <@leader> <@player2> [<@player3> <@player4>] [skin]`",
+    "assign-player": "`;assign-player <event_id> <@player> <@team_leader>`",
+    "remove-from-team": "`;remove-from-team <event_id> <@player>`",
+    "register-player": "`;register-player [ign] [game_id]`",
+    "change-ign": "`;change-ign <new_ign>`",
+    "change-data": "`;change-data [username] [game_name] [game_id] [country] [region]`",
+    "stats": "`;stats [@user]`",
+    "rank": "`;rank [@user]`",
+    "leaderboard": "`;leaderboard [event_id]`",
+    "events": "`;events`",
+    "compare": "`;compare <@player1> <@player2>`",
+    "event-placement": "`;event-placement <event_id> [@user]`",
+    "event-stats": "`;event-stats <event_id> [@user]`",
+    "assign-points": "`;assign-points <event_id> <game_number> <@player> <points>`",
+    "add-kills": "`;add-kills <event_id> <game_number> <@player> <kills>`",
+    "dq-player": "`;dq-player <event_id> <game_number> <@player> [reason]`",
+    "game-stats": "`;game-stats <event_id> <game_number>`",
+    "create-lobby": "`;create-lobby <event_id> <name>`",
+    "join-lobby": "`;join-lobby <lobby_id> <@player>`",
+    "remove-from-lobby": "`;remove-from-lobby <lobby_id> <@player>`",
+    "lobby-info": "`;lobby-info <lobby_id>`",
+    "lobbies": "`;lobbies <event_id>`",
+    "set-lobby-code": "`;set-lobby-code <lobby_id> <room_code>`",
+    "close-lobby": "`;close-lobby <lobby_id>`",
+    "8ball": "`;8ball <question>`",
+    "roll": "`;roll [sides]`",
+    "status": "`;status`",
+    "season": "`;season`",
+    "season-stats": "`;season-stats [season] [@user]`",
+    "best-players": "`;best-players [stat] [limit]`",
+    "worst-players": "`;worst-players [stat] [limit]`",
+    "game-style": "`;game-style [@user]`",
+    "say-hi": "`;say-hi`",
+    "qualify": "`;qualify` (via ⭐ Qualify button)",
+    "admin-qualify": "`;admin qualify <event_id> <@player>`",
+    "admin-qualified": "`;admin qualified <event_id>`",
+    "admin-remove-qualified": "`;admin remove-qualified <event_id> <@player>`",
+    "admin-move-qualified": "`;admin move-qualified <source_event> <target_event> confirm:yes`",
+    "schedule": "`;schedule [event_id] [time]` — schedules an event (e.g. `3:00 PM EST`) or lists scheduled events",
+    "unschedule": "`;unschedule <event_id>`",
+    "invite-coins": "`;invite-coins [@user]` — check your invite-coin balance",
+    "shop": "`;shop` — browse the coin shop",
+    "pic-perms": "`;pic-perms <30s|1m|3m|5m>` — buy Pic Perms (30s=2, 1m=5, 3m=7, 5m=15 coins)",
+    "coin-top": "`;coin-top` — top inviters by coins",
+    "invite-info": "`;invite-info` — see your invite links",
+    "invite-review": "`;invite-review` (ADMIN) — list pending/suspicious invite rewards",
+    "invite-approve": "`;invite-approve <reward_id>` (ADMIN) — force-approve a reward",
+    "invite-reject": "`;invite-reject <reward_id> [reason]` (ADMIN) — reject a reward",
+}
+
+
+class ScrimBot(commands.Bot):
+    def __init__(self) -> None:
+        intents = discord.Intents.default()
+        intents.members = True
+        intents.guilds = True
+        intents.message_content = True
+        super().__init__(
+            command_prefix=";",
+            intents=intents,
+            activity=discord.Activity(
+                type=ACTIVITY_TYPES[ACTIVITY_ROTATION[0][0]],
+                name=ACTIVITY_ROTATION[0][1],
+            ),
+        )
+
+    async def setup_hook(self) -> None:
+        init_db()
+        await self.load_cogs()
+        self.tree.error(self._on_app_command_error)
+        self.activity_loop = self.loop.create_task(self._rotate_activity())
+        logger.info("cogs_loaded")
+
+    async def _rotate_activity(self) -> None:
+        index = 1
+        while True:
+            await asyncio.sleep(180)
+            try:
+                activity_type, name = ACTIVITY_ROTATION[index % len(ACTIVITY_ROTATION)]
+                await self.change_presence(
+                    activity=discord.Activity(type=ACTIVITY_TYPES[activity_type], name=name)
+                )
+                index += 1
+            except Exception:
+                logger.warning("activity_rotation_failed", exc_info=True)
+
+    async def load_cogs(self) -> None:
+        cogs = [
+            "cogs.registration",
+            "cogs.events",
+            "cogs.general",
+            "cogs.admin",
+            "cogs.lobbies",
+            "cogs.queue_processor",
+            "cogs.hall_of_fame",
+            "cogs.schedule",
+            "cogs.coins",
+            "views.registration",
+        ]
+        for cog_path in cogs:
+            try:
+                await self.load_extension(cog_path)
+                logger.info("cog_loaded: %s", cog_path)
+            except Exception as e:
+                logger.error("cog_load_failed: %s — %s", cog_path, e, exc_info=True)
+
+    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
+        if isinstance(error, commands.MissingRequiredArgument):
+            cmd_name = ctx.command.name if ctx.command else "command"
+            syntax = COMMAND_SYNTAX.get(cmd_name, "")
+            msg = f"**Missing required parameter:** `{error.param.name}`\n"
+            if syntax:
+                msg += f"Correct syntax: {syntax}"
+            await ctx.send(embed=discord.Embed(description=msg, color=0xE74C3C))
+        elif isinstance(error, commands.TooManyArguments):
+            cmd_name = ctx.command.name if ctx.command else "command"
+            syntax = COMMAND_SYNTAX.get(cmd_name, "")
+            msg = "**Too many arguments provided.**\n"
+            if syntax:
+                msg += f"Correct syntax: {syntax}"
+            await ctx.send(embed=discord.Embed(description=msg, color=0xE74C3C))
+        elif isinstance(error, commands.BadArgument):
+            cmd_name = ctx.command.name if ctx.command else "command"
+            syntax = COMMAND_SYNTAX.get(cmd_name, "")
+            msg = f"**Invalid argument:** {error}\n"
+            if syntax:
+                msg += f"Correct syntax: {syntax}"
+            await ctx.send(embed=discord.Embed(description=msg, color=0xE74C3C))
+        elif isinstance(error, commands.CommandNotFound):
+            pass
+        else:
+            logger.error("command_error: %s — %s", ctx.command, error, exc_info=True)
+            await ctx.send(
+                embed=discord.Embed(
+                    description=f"An error occurred: {error}",
+                    color=0xE74C3C,
+                )
+            )
+
+    async def _on_app_command_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        if isinstance(error, app_commands.TransformedTransformerError):
+            msg = f"**Invalid argument type:** {error}"
+        elif isinstance(error, app_commands.CommandInvokeError):
+            msg = f"**Command error:** {error.original}"
+        else:
+            msg = f"**Error:** {error}"
+
+        embed = discord.Embed(description=msg, color=0xE74C3C)
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def on_ready(self) -> None:
+        logger.info("bot_ready", extra={"user": str(self.user)})
+        guild_id = settings.discord_guild_id
+        try:
+            if guild_id:
+                guild = discord.Object(id=int(guild_id))
+                self.tree.copy_global_to(guild=guild)
+                cmds = await self.tree.sync(guild=guild)
+            else:
+                cmds = await self.tree.sync()
+            logger.info("commands_synced", extra={"count": len(cmds)})
+        except discord.errors.Forbidden:
+            logger.error(
+                "Failed to sync commands (Forbidden). Causes: (1) the bot invite "
+                "is missing the 'applications.commands' scope, or (2) DISCORD_GUILD_ID "
+                "(%s) points to a server the bot is not in, or the bot lacks "
+                "'Use Slash Commands' permission in that server. "
+                "Falling back to global sync.",
+                guild_id,
+            )
+            try:
+                cmds = await self.tree.sync()
+                logger.info("commands_synced_globally", extra={"count": len(cmds)})
+            except Exception as e:
+                logger.error("global_sync_failed: %s", e)
+        except Exception as e:
+            logger.error("sync_failed: %s", e)
+
+
+async def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    bot = ScrimBot()
+    async with bot:
+        await bot.start(settings.discord_bot_token)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

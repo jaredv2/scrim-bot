@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Player Search — Scrim Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <h1>Scrim Dashboard</h1>
+            <div>
+                <a href="/">Events</a> &nbsp;|&nbsp;
+                <a href="/players">Players</a> &nbsp;|&nbsp;
+                <a href="/leaderboard">Leaderboard</a> &nbsp;|&nbsp;
+                <a href="/compare">Compare</a> &nbsp;|&nbsp;
+                <a href="/search">Search</a> &nbsp;|&nbsp;
+                <a href="/bans">Bans</a>
+            </div>
+        </div>
+    </header>
+    <div class="container">
+
+        <div class="card">
+            <h2>Search Players</h2>
+            <p style="font-size: 12px; color: #666; margin-bottom: 8px;">Find players by Discord name or in-game name (IGN).</p>
+            <input type="text" id="q" value="{{ q }}" placeholder="Type a name or IGN..." style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px;">
+            <div id="auto" style="margin-top: 6px; font-size: 13px;"></div>
+            <button class="btn btn-primary" id="go" style="margin-top: 8px;">Search</button>
+        </div>
+
+        <div class="card">
+            <h2>Results</h2>
+            {% if results %}
+            <table>
+                <thead><tr><th>#</th><th>Player</th><th>IGN</th><th>PR</th><th></th></tr></thead>
+                <tbody>
+                    {% for r in results %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ r.username }}</td>
+                        <td>{{ r.game_username or '-' }}</td>
+                        <td>{{ r.pr }}</td>
+                        <td><a class="btn btn-primary btn-sm" href="/account/{{ r.discord_id }}">View</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% elif q %}
+            <div class="empty">No players found.</div>
+            {% else %}
+            <div class="empty">Type a name above to search.</div>
+            {% endif %}
+        </div>
+
+    </div>
+
+    <script>
+    function doSearch() {
+        window.location = '/search?q=' + encodeURIComponent($('#q').val().trim());
+    }
+    $('#go').on('click', doSearch);
+    $('#q').on('keydown', function(e) { if (e.key === 'Enter') doSearch(); });
+
+    $('#q').on('input', function() {
+        var q = $(this).val().trim();
+        if (q.length < 2) { $('#auto').html(''); return; }
+        $.getJSON('/api/players/search', { q: q }, function(data) {
+            if (!data.results || !data.results.length) { $('#auto').html(''); return; }
+            var html = data.results.slice(0, 5).map(function(r) {
+                return '<div><a href="/account/' + r.discord_id + '">' +
+                    $('<span>').text(r.username).html() +
+                    (r.game_username ? ' <em>[' + $('<span>').text(r.game_username).html() + ']</em>' : '') +
+                    '</a> — PR ' + r.pr + '</div>';
+            }).join('');
+            $('#auto').html(html);
+        });
+    });
+    </script>
+</body>
+</html>

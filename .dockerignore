@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+data/
+*.db
+.git/
+.gitignore
+*.md
+run.bat
+.vscode/

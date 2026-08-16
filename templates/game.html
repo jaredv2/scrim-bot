@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Game {{ game.game_number }} — {{ event.name }}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <h1>{{ event.name }} — Game {{ game.game_number }}</h1>
+            <div>
+                <a href="/event/{{ event.id }}">Back to Event</a> &nbsp;|&nbsp;
+                <a href="/players">Players</a> &nbsp;|&nbsp;
+                <a href="/bans">Bans</a>
+            </div>
+        </div>
+    </header>
+    <div class="container">
+        <div class="card">
+            <h2>Game Info</h2>
+            <table>
+                <tr><td><strong>Game Number</strong></td><td>{{ game.game_number }}</td></tr>
+                <tr><td><strong>Status</strong></td><td><span class="status-badge status-{{ game.status }}">{{ game.status }}</span></td></tr>
+                <tr><td><strong>Room Code</strong></td><td>{{ game.room_code or 'N/A' }}</td></tr>
+                {% if winner_team %}
+                <tr><td><strong>Winner</strong></td><td>🥇 {{ winner_team.team_name }}{% if winner_ign %} [{{ winner_ign }}]{% endif %}</td></tr>
+                {% if winner_team.team_members %}
+                <tr><td><strong>Team Members</strong></td><td>{% for mid in winner_team.team_members.split(',') %}{% set m_name = player_map.get(mid, mid) %}{% set m_ign = ign_map.get(mid, '') %}{{ m_name }}{% if m_ign %} [{{ m_ign }}]{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>
+                {% endif %}
+                {% elif winner %}
+                <tr><td><strong>Winner</strong></td><td>🥇 {{ winner.username }}{% if winner_ign %} [{{ winner_ign }}]{% endif %}</td></tr>
+                {% endif %}
+                <tr><td><strong>Started</strong></td><td>{{ game.started_at[:19] if game.started_at else '-' }}</td></tr>
+                <tr><td><strong>Ended</strong></td><td>{{ game.ended_at[:19] if game.ended_at else '-' }}</td></tr>
+            </table>
+            {% if game.status != 'completed' %}
+            <form method="post" action="/event/{{ event.id }}/end-match" style="margin-top:10px" onsubmit="return confirm('End this match and lock placements?')">
+                <input type="hidden" name="game_number" value="{{ game.game_number }}">
+                <button type="submit" class="btn btn-danger">🏁 End Match</button>
+            </form>
+            {% endif %}
+        </div>
+
+        {% set is_completed = (game.status == 'completed') %}
+        {% set placement_labels = ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th'] %}
+
+        {% if event.team_size >= 2 %}
+        <div class="card">
+            <h2>Team Leaderboard ({{ team_board|length }})</h2>
+            {% if team_board %}
+            <div class="leaderboard-table">
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th><th>Team</th><th>Kills</th>
+                        <th>Placement</th>
+                        <th>Points</th>{% if not is_completed %}<th>Actions</th>{% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for t in team_board %}
+                    {% set lead_ign = ign_map.get(t.lead_id, '') %}
+                    <tr{% if t.is_dq %} class="dq-row"{% endif %} data-lead="{{ t.lead_id }}">
+                        <td>{{ loop.index }}</td>
+                        <td{% if t.is_dq %} style="text-decoration:line-through"{% endif %}>
+                            <span class="teammate-name" data-discord="{{ t.lead_id }}" data-team-lead="{{ t.lead_id }}">{{ t.team_name }}{% if lead_ign %} [{{ lead_ign }}]{% endif %}</span>
+                            {% if t.team_members %}
+                                — {% for mid in t.team_members.split(',') %}{% set m_name = player_map.get(mid, mid) %}{% set m_ign = ign_map.get(mid, '') %}<span class="teammate-name" data-discord="{{ mid }}" data-team-lead="{{ t.lead_id }}">{{ m_name }}{% if m_ign %} [{{ m_ign }}]{% endif %}</span>{% if not loop.last %}, {% endif %}{% endfor %}
+                            {% endif %}{% if t.is_dq %} DQ{% endif %}
+                        </td>
+                        <td>{{ t.total_kills }}</td>
+                        <td class="live-placement">
+                            {% if t.is_dq %}DQ
+                            {% elif is_completed and loop.index0 < placement_labels|length %}{{ placement_labels[loop.index0] }}
+                            {% elif is_completed %}#{{ loop.index }}
+                            {% else %}#{{ loop.index }}{% endif %}
+                        </td>
+                        <td>{% if t.is_dq %}DQ{% else %}{{ t.total_points }}{% endif %}</td>
+                        {% if not is_completed %}
+                        <td>
+                            <button class="btn btn-danger btn-sm ajax-kill" data-discord="{{ t.lead_id }}">+Kill</button>
+                            <button class="btn btn-success btn-sm ajax-win" data-discord="{{ t.lead_id }}">+Win</button>
+                            <button class="btn btn-warning btn-sm ajax-remove-pts" data-discord="{{ t.lead_id }}">-Pts</button>
+                            <button class="btn btn-secondary btn-sm ajax-dq" data-discord="{{ t.lead_id }}">DQ</button>
+                            <button class="btn btn-danger btn-sm ajax-eliminate" data-discord="{{ t.lead_id }}" style="background:#8e44ad">Eliminate</button>
+                        </td>
+                        {% endif %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
+            {% else %}
+            <div class="empty">No team data.</div>
+            {% endif %}
+        </div>
+        {% else %}
+        <div class="card">
+            <h2>Leaderboard ({{ players|length }})</h2>
+            {% if players %}
+            <div class="leaderboard-table">
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th><th>Player</th><th>Kills</th>
+                        <th>Placement</th>
+                        <th>Points</th>{% if not is_completed %}<th>Actions</th>{% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for p in players %}
+                    <tr{% if p.is_disqualified %} class="dq-row"{% endif %} data-discord="{{ p.discord_id }}">
+                        <td>{{ loop.index }}</td>
+                        <td{% if p.is_disqualified %} style="text-decoration:line-through"{% endif %}>{{ p.username }}{% if p.is_disqualified %} DQ{% endif %}</td>
+                        <td>{{ p.kills }}</td>
+                        <td class="live-placement">
+                            {% if p.is_disqualified %}DQ
+                            {% elif is_completed and p.placement %}{{ p.placement }}{{ ['st','nd','rd'][p.placement - 1] if p.placement <= 3 else 'th' }}
+                            {% elif is_completed and loop.index0 < placement_labels|length %}{{ placement_labels[loop.index0] }}
+                            {% elif is_completed %}#{{ loop.index }}
+                            {% else %}#{{ loop.index }}{% endif %}
+                        </td>
+                        <td>{% if p.is_disqualified %}DQ{% else %}{{ p.points }}{% endif %}</td>
+                        {% if not is_completed %}
+                        <td>
+                            <button class="btn btn-danger btn-sm ajax-kill" data-discord="{{ p.discord_id }}">+Kill</button>
+                            <button class="btn btn-success btn-sm ajax-win" data-discord="{{ p.discord_id }}">+Win</button>
+                            <button class="btn btn-warning btn-sm ajax-remove-pts" data-discord="{{ p.discord_id }}">-Pts</button>
+                            <button class="btn btn-secondary btn-sm ajax-dq" data-discord="{{ p.discord_id }}">DQ</button>
+                            <button class="btn btn-danger btn-sm ajax-eliminate" data-discord="{{ p.discord_id }}" style="background:#8e44ad">Eliminate</button>
+                        </td>
+                        {% endif %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
+            {% else %}
+            <div class="empty">No player data.</div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {% if kills %}
+        <div class="card">
+            <h2>Kill Feed ({{ kills|length }})</h2>
+            <table>
+                <thead>
+                    <tr><th>#</th><th>Killer</th><th>Victim</th><th>Weapon</th><th>Time</th></tr>
+                </thead>
+                <tbody>
+                    {% for k in kills %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ k.killer_name }}</td>
+                        <td>{{ k.victim_name }}</td>
+                        <td>{{ k.weapon or '-' }}</td>
+                        <td>{{ k.created_at[:19] }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+
+    {% if not is_completed %}
+    <script>
+    var EVENT_ID = {{ event.id }};
+    var GAME_NUMBER = {{ game.game_number }};
+
+    $(function() {
+        $.get('/event/' + EVENT_ID + '/ajax/placement-status', {game_number: GAME_NUMBER}, function(r) {
+            if (r.ok) applyLivePlacements(r.projected);
+        });
+    });
+
+    function getRow(el) {
+        return $(el).closest('tr');
+    }
+
+    function getCells(row) {
+        var cells = row.find('td');
+        return {
+            kills: cells.eq(2),
+            points: cells.eq(cells.length - 2),
+            placement: row.find('.live-placement')
+        };
+    }
+
+    var LIVE_LABELS = ['1st','2nd','3rd','4th','5th','6th','7th','8th','9th','10th','11th','12th','13th','14th','15th','16th','17th','18th','19th','20th'];
+
+    function liveLabel(n) {
+        return LIVE_LABELS[n - 1] || n + 'th';
+    }
+
+    function applyLivePlacements(projected) {
+        if (!projected) return;
+        projected.forEach(function(pp) {
+            var $row = $('tr[data-discord="' + pp.discord_id + '"]');
+            if (!$row.length) $row = $('tr[data-lead="' + pp.discord_id + '"]');
+            if (!$row.length) return;
+            var $cell = $row.find('.live-placement');
+            if (!$cell.length) return;
+            if (pp.placement) {
+                $cell.text(liveLabel(pp.placement));
+                $row.css('opacity', '0.6');
+            } else {
+                $cell.text('#' + (pp.projected || '?'));
+                $row.css('opacity', '1');
+            }
+        });
+    }
+
+    $(document).on('click', '.ajax-kill', function(e) {
+        e.preventDefault();
+        var $btn = $(this);
+        var did = $btn.data('discord');
+        $.post('/event/' + EVENT_ID + '/ajax/quick-kill', {discord_id: did, game_number: GAME_NUMBER}, function(r) {
+            if (r.ok) {
+                var row = getRow($btn);
+                var cells = getCells(row);
+                var cur = parseInt(cells.kills.text()) || 0;
+                cells.kills.text(cur + 1);
+                var ptCur = parseInt(cells.points.text()) || 0;
+                cells.points.text(ptCur + (r.points_added || 1));
+            } else {
+                alert(r.error || 'Error');
+            }
+        }).fail(function(xhr) {
+            var msg = 'Error';
+            try { msg = JSON.parse(xhr.responseText).error; } catch(e) {}
+            alert(msg);
+        });
+    });
+
+    $(document).on('click', '.ajax-win', function(e) {
+        e.preventDefault();
+        var $btn = $(this);
+        var did = $btn.data('discord');
+        $.post('/event/' + EVENT_ID + '/ajax/quick-win', {discord_id: did, game_number: GAME_NUMBER}, function(r) {
+            if (r.ok) {
+                var row = getRow($btn);
+                var cells = getCells(row);
+                var ptCur = parseInt(cells.points.text()) || 0;
+                cells.points.text(ptCur + (r.points_added || 5));
+            } else {
+                alert(r.error || 'Error');
+            }
+        }).fail(function(xhr) {
+            var msg = 'Error';
+            try { msg = JSON.parse(xhr.responseText).error; } catch(e) {}
+            alert(msg);
+        });
+    });
+
+    $(document).on('click', '.ajax-remove-pts', function(e) {
+        e.preventDefault();
+        var $btn = $(this);
+        var did = $btn.data('discord');
+        var pts = prompt('How many points to remove?', '1');
+        if (pts === null) return;
+        pts = parseInt(pts) || 0;
+        if (pts <= 0) return;
+        $.post('/event/' + EVENT_ID + '/ajax/remove-points', {discord_id: did, points: pts}, function(r) {
+            if (r.ok) {
+                var row = getRow($btn);
+                var cells = getCells(row);
+                var ptCur = parseInt(cells.points.text()) || 0;
+                cells.points.text(Math.max(0, ptCur - pts));
+            } else {
+                alert(r.error || 'Error');
+            }
+        }).fail(function(xhr) {
+            var msg = 'Error';
+            try { msg = JSON.parse(xhr.responseText).error; } catch(e) {}
+            alert(msg);
+        });
+    });
+
+    $(document).on('click', '.ajax-dq', function(e) {
+        e.preventDefault();
+        var $btn = $(this);
+        var did = $btn.data('discord');
+        var reason = prompt('DQ reason?', 'No reason given');
+        if (reason === null) return;
+        $.post('/event/' + EVENT_ID + '/ajax/dq-player', {discord_id: did, reason: reason}, function(r) {
+            if (r.ok) {
+                var row = getRow($btn);
+                row.addClass('dq-row');
+                var cells = row.find('td');
+                cells.eq(1).css('text-decoration', 'line-through');
+                var ptIdx = cells.length - 2;
+                cells.eq(ptIdx).text('DQ');
+                cells.eq(2).text('DQ');
+                row.find('.btn').prop('disabled', true);
+            } else {
+                alert(r.error || 'Error');
+            }
+        }).fail(function(xhr) {
+            var msg = 'Error';
+            try { msg = JSON.parse(xhr.responseText).error; } catch(e) {}
+            alert(msg);
+        });
+    });
+
+    $(document).on('click', '.ajax-eliminate', function(e) {
+        e.preventDefault();
+        var $btn = $(this);
+        var did = $btn.data('discord');
+        $.post('/event/' + EVENT_ID + '/ajax/eliminate', {
+            discord_id: did, game_number: GAME_NUMBER
+        }, function(r) {
+            if (r.ok) {
+                var row = getRow($btn);
+                if (r.placed) {
+                    applyLivePlacements(r.projected);
+                    $btn.text('Undo');
+                    row.css('opacity', '0.6');
+                } else {
+                    applyLivePlacements(r.projected);
+                    $btn.text('Eliminate');
+                    row.css('opacity', '1');
+                }
+            } else {
+                alert(r.error || 'Error');
+            }
+        }).fail(function(xhr) {
+            var msg = 'Error';
+            try { msg = JSON.parse(xhr.responseText).error; } catch(e) {}
+            alert(msg);
+        });
+    });
+
+    $(document).on('click', '.teammate-name', function(e) {
+        e.preventDefault();
+        var $el = $(this);
+        if ($el.hasClass('eliminated')) return;
+        var did = $el.data('discord');
+        var teamLead = $el.data('team-lead');
+        $.post('/event/' + EVENT_ID + '/ajax/mark-teammate-eliminated', {
+            discord_id: did, game_number: GAME_NUMBER
+        }, function(r) {
+            if (r.ok) {
+                $el.addClass('eliminated').css({'text-decoration': 'line-through', 'opacity': '0.5'});
+                if (r.all_eliminated) {
+                    var $elimBtn = $('tr[data-lead="' + teamLead + '"] .ajax-eliminate');
+                    if ($elimBtn.length && !$elimBtn.prop('disabled')) {
+                        $elimBtn.trigger('click');
+                    }
+                }
+            } else {
+                alert(r.error || 'Error');
+            }
+        }).fail(function(xhr) {
+            var msg = 'Error';
+            try { msg = JSON.parse(xhr.responseText).error; } catch(e) {}
+            alert(msg);
+        });
+    });
+    </script>
+    {% endif %}
+</body>
+</html>

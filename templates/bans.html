@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bans — Scrim Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <h1>Scrim Dashboard</h1>
+            <div>
+                <a href="/">Events</a> &nbsp;|&nbsp;
+                <a href="/players">Players</a> &nbsp;|&nbsp;
+                <a href="/bans">Bans</a>
+            </div>
+        </div>
+    </header>
+    <div class="container">
+
+        <div class="card">
+            <h2>Add Ban</h2>
+            <form method="POST" action="/bans/add">
+                <div class="form-row">
+                    <div>
+                        <label>Discord ID</label>
+                        <input type="text" name="discord_id" placeholder="123456789012345678" required>
+                    </div>
+                    <div>
+                        <label>Duration</label>
+                        <input type="text" name="duration" value="0" placeholder="0 = permanent, or 2h / 3d / 1w">
+                    </div>
+                    <div>
+                        <label>Reason</label>
+                        <input type="text" name="reason" placeholder="Optional reason">
+                    </div>
+                    <button type="submit" class="btn btn-danger">Ban</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>Active Bans ({{ bans|length }})</h2>
+            {% if bans %}
+            <table>
+                <thead>
+                    <tr><th>Player</th><th>Discord ID</th><th>Reason</th><th>Banned Until</th><th>Created</th><th></th></tr>
+                </thead>
+                <tbody>
+                    {% for b in bans %}
+                    <tr>
+                        <td>{{ b.username or 'Unknown' }}</td>
+                        <td>{{ b.discord_id }}</td>
+                        <td>{{ b.reason or '—' }}</td>
+                        <td>
+                            {% if b.banned_until %}
+                                {% if b.banned_until > now_iso %}<span style="color: #e74c3c;">{{ b.banned_until }}</span>
+                                {% else %}<span style="color: #95a5a6;">expired ({{ b.banned_until }})</span>{% endif %}
+                            {% else %}Permanent{% endif %}
+                        </td>
+                        <td>{{ b.created_at }}</td>
+                        <td>
+                            <form method="POST" action="/bans/{{ b.id }}/unban" style="margin: 0;">
+                                <button type="submit" class="btn btn-success btn-sm">Unban</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty">No bans.</div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

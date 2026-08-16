@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Leaderboard — Scrim Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <h1>Scrim Dashboard</h1>
+            <div>
+                <a href="/">Events</a> &nbsp;|&nbsp;
+                <a href="/players">Players</a> &nbsp;|&nbsp;
+                <a href="/leaderboard">Leaderboard</a> &nbsp;|&nbsp;
+                <a href="/compare">Compare</a> &nbsp;|&nbsp;
+                <a href="/search">Search</a> &nbsp;|&nbsp;
+                <a href="/bans">Bans</a>
+            </div>
+        </div>
+    </header>
+    <div class="container">
+
+        <div class="card">
+            <h2>Season {{ season }} Leaderboard</h2>
+            <p style="font-size: 12px; color: #666;">Sorted by PR. Click a player for the full profile.</p>
+        </div>
+
+        {% for tier, rows in tiers.items() %}
+        <div class="card">
+            <h2>{{ tier }}</h2>
+            <table>
+                <thead><tr><th>#</th><th>Player</th><th>IGN</th><th>PR</th><th>Wins</th><th>Kills</th><th>Games</th><th>Avg Place</th></tr></thead>
+                <tbody>
+                    {% for row in rows %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td><a href="/account/{{ row.discord_id }}">{{ row.username }}</a></td>
+                        <td>{{ row.game_username or '-' }}</td>
+                        <td>{{ row.pr }}</td>
+                        <td>{{ row.total_wins }}</td>
+                        <td>{{ row.total_kills }}</td>
+                        <td>{{ row.total_games }}</td>
+                        <td>{{ row.avg_placement or '-' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endfor %}
+
+        {% if not tiers %}
+        <div class="card"><div class="empty">No ranked players this season yet.</div></div>
+        {% endif %}
+
+    </div>
+</body>
+</html>

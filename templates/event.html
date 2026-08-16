@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ event.name }} — Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <style>
+        .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 2px solid #3498db; padding-bottom: 0; }
+        .tab-btn { padding: 10px 20px; border: none; background: #ecf0f1; color: #2c3e50; cursor: pointer; font-size: 14px; font-weight: 600; border-radius: 6px 6px 0 0; transition: background 0.2s; }
+        .tab-btn:hover { background: #bdc3c7; }
+        .tab-btn.active { background: #3498db; color: white; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .match-card { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 12px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
+        .match-card .match-info { flex: 1; }
+        .match-card .match-info h3 { margin: 0 0 4px 0; font-size: 14px; color: #2c3e50; }
+        .match-card .match-info span { font-size: 12px; color: #7f8c8d; }
+        .match-card .match-link { text-decoration: none; }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <h1>{{ event.name }}</h1>
+            <div>
+                <a href="/">Events</a> &nbsp;|&nbsp;
+                <a href="/players">Players</a> &nbsp;|&nbsp;
+                <a href="/bans">Bans</a>
+            </div>
+        </div>
+    </header>
+    <div class="container">
+
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="info">Info</button>
+            <button class="tab-btn" data-tab="players">Players</button>
+            <button class="tab-btn" data-tab="matches">Matches</button>
+            <button class="tab-btn" data-tab="sessions">Sessions</button>
+            <button class="tab-btn" data-tab="leaderboard">Leaderboard</button>
+        </div>
+
+        <div id="tab-info" class="tab-content active">
+            <div class="card">
+                <h2>Event Info</h2>
+                <table>
+                    <tr><td><strong>Status</strong></td><td><span class="status-badge status-{{ event.status }}">{{ event.status }}</span></td></tr>
+                    <tr><td><strong>Format</strong></td><td>{{ event.event_format }} / {{ event.region }}</td></tr>
+                    <tr><td><strong>Team</strong></td><td>{{ ['Solo','Duo','Trio'][event.team_size - 1] }}</td></tr>
+                    <tr><td><strong>Points</strong></td><td>Kill: {{ event.point_kill }} | Win: {{ event.point_win }}</td></tr>
+                    <tr><td><strong>Placement</strong></td><td>{{ event.placement_scale or '[10,8,6,4,2,1]' }}</td></tr>
+                    <tr><td><strong>PR Multiplier</strong></td><td>{% if participant_count is defined %}{% if participant_count < 8 %}1.2x (Small){% elif participant_count < 20 %}1.5x (Big){% else %}1.9x (Huge){% endif %}{% else %}Auto (by player count){% endif %}</td></tr>
+                    <tr><td><strong>Games</strong></td><td>{{ event.current_game }} / {{ event.total_games if event.total_games > 0 else '∞' }}</td></tr>
+                    <tr><td><strong>Room Code</strong></td><td>{{ event.room_code or 'N/A' }}</td></tr>
+                </table>
+            </div>
+
+            <div class="card">
+                <h2>Placement Scale</h2>
+                <p style="font-size:12px;color:#666;margin-bottom:8px">Points for each placement (1st, 2nd, 3rd...). Comma-separated. Leave empty if not needed.</p>
+                <form id="placement-scale-form" style="display:flex;gap:8px;align-items:flex-end">
+                    <div style="flex:1">
+                        <input type="text" id="placement-scale" value="{{ event.placement_scale or '[10,8,6,4,2,1]' }}" placeholder="[10,8,6,4,2,1]">
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                </form>
+                <div id="scale-status" style="font-size:12px;margin-top:4px"></div>
+            </div>
+
+            <div class="card">
+                <h2>Kill Feed</h2>
+                <form id="kill-feed-form">
+                    <div class="form-row">
+                        <div>
+                            <label>Killer</label>
+                            <select name="killer_id" required>
+                                <option value="">Select player</option>
+                                {% for r in registrations %}
+                                <option value="{{ r.discord_id }}">{{ r.username }}{% if r.team_members %} (Team){% endif %}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div>
+                            <label>Victim</label>
+                            <select name="victim_id" required>
+                                <option value="">Select player</option>
+                                {% for r in registrations %}
+                                <option value="{{ r.discord_id }}">{{ r.username }}{% if r.team_members %} (Team){% endif %}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div><label>Weapon</label><input type="text" name="weapon" placeholder="Optional"></div>
+                        <div><button type="submit" class="btn btn-danger btn-sm">Dispatch Kill</button></div>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div id="tab-players" class="tab-content">
+            {% if event.team_size == 1 %}
+            <div class="card">
+                <h2>Players ({{ registrations|length }})</h2>
+                {% if registrations %}
+                <table>
+                    <thead><tr><th>#</th><th>Player</th><th>IGN</th><th>Discord ID</th><th>Qualified</th></tr></thead>
+                    <tbody>
+                        {% for r in registrations %}
+                        {% set ign = ign_map.get(r.discord_id, '') %}
+                        {% set qualified = r.discord_id in qualifiers %}
+                        <tr>
+                            <td>{{ loop.index }}</td>
+                            <td>{{ r.username }}</td>
+                            <td>{{ ign or '-' }}</td>
+                            <td>{{ r.discord_id }}</td>
+                            <td>
+                                <button class="btn btn-sm ajax-qualify{% if qualified %} btn-warning{% else %} btn-secondary{% endif %}" data-discord="{{ r.discord_id }}" data-qualified="{{ 1 if qualified else 0 }}">{% if qualified %}⭐ Qualified{% else %}⭐ Qualify{% endif %}</button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="empty">No players yet.</div>
+                {% endif %}
+            </div>
+            {% else %}
+            <div class="card">
+                <h2>Teams ({{ registrations|length }})</h2>
+                {% if registrations %}
+                <table>
+                    <thead><tr><th>#</th><th>Players</th><th>Qualified</th></tr></thead>
+                    <tbody>
+                        {% for r in registrations %}
+                        {% set members = r.team_members.split(',') if r.team_members else [] %}
+                        {% set lead_ign = ign_map.get(r.discord_id, '') %}
+                        {% set qualified = r.discord_id in qualifiers %}
+                        <tr>
+                            <td>{{ loop.index }}</td>
+                            <td>
+                                {{ r.username }} ({{ r.discord_id }}) {% if lead_ign %}[{{ lead_ign }}]{% endif %}
+                                {% for mid in members %}
+                                    + {{ player_map.get(mid, mid) }} ({{ mid }}) {% set m_ign = ign_map.get(mid, '') %}{% if m_ign %}[{{ m_ign }}]{% endif %}
+                                {% endfor %}
+                            </td>
+                            <td>
+                                <button class="btn btn-sm ajax-qualify{% if qualified %} btn-warning{% else %} btn-secondary{% endif %}" data-discord="{{ r.discord_id }}" data-qualified="{{ 1 if qualified else 0 }}">{% if qualified %}⭐ Qualified{% else %}⭐ Qualify{% endif %}</button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="empty">No teams yet.</div>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+
+        <div id="tab-matches" class="tab-content">
+            <div class="card">
+                <h2>Matches ({{ games|length }})</h2>
+                {% if games %}
+                    {% for g in games %}
+                    <a href="/event/{{ event.id }}/game/{{ g.game_number }}" class="match-link">
+                        <div class="match-card">
+                            <div class="match-info">
+                                <h3>Game {{ g.game_number }} <span class="status-badge status-{{ g.status }}">{{ g.status }}</span></h3>
+                                <span>Room: {{ g.room_code or 'N/A' }} | Started: {{ g.started_at[:16] if g.started_at else '-' }} | Ended: {{ g.ended_at[:16] if g.ended_at else '-' }}</span>
+                            </div>
+                            <span class="btn btn-primary btn-sm">View</span>
+                        </div>
+                    </a>
+                    {% endfor %}
+                {% else %}
+                <div class="empty">No matches yet.</div>
+                {% endif %}
+            </div>
+        </div>
+
+        <div id="tab-sessions" class="tab-content">
+            <div class="card">
+                <h2>Session Controls</h2>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+                    <form method="post" action="/event/{{ event.id }}/create-session" style="margin:0">
+                        <button type="submit" class="btn btn-primary btn-sm">＋ New Session</button>
+                    </form>
+                    {% if not active_session %}
+                    <form method="post" action="/event/{{ event.id }}/session/start" style="margin:0;display:flex;gap:6px;align-items:center">
+                        <input type="text" name="room_code" placeholder="Room code (optional)" style="padding:6px;border:1px solid #ccc;border-radius:4px">
+                        <button type="submit" class="btn btn-primary btn-sm">▶ Start Session</button>
+                    </form>
+                    {% endif %}
+                    {% if active_session %}
+                    {% set cur = (session_match_lists[active_session.id] | selectattr('status', 'equalto', 'in_progress') | first) if session_match_lists.get(active_session.id) else None %}
+                    <form method="post" action="/event/{{ event.id }}/session/end-match" class="session-end-match-form" style="margin:0">
+                        <input type="hidden" name="game_number" value="{{ cur.game_number if cur else active_session.current_match }}">
+                        <button type="submit" class="btn btn-danger btn-sm">⏹ End Match #{{ cur.game_number if cur else active_session.current_match }} &amp; Next</button>
+                    </form>
+                    <form method="post" action="/event/{{ event.id }}/session/end" class="session-end-form" style="margin:0">
+                        <button type="submit" class="btn btn-warning btn-sm">🏁 End Session #{{ active_session.session_number }}</button>
+                    </form>
+                    {% endif %}
+                </div>
+                {% if active_session %}
+                <p style="font-size:12px;color:#666;margin-top:8px">
+                    Session <strong>#{{ active_session.session_number }}</strong> is live — match {{ active_session.current_match }}
+                    {% if active_session.room_code %} | Room: {{ active_session.room_code }}{% endif %}
+                </p>
+                {% endif %}
+            </div>
+
+            {% for s in sessions %}
+            {% set matches = session_match_lists.get(s.id, []) %}
+            {% set board = session_boards.get(s.id, []) %}
+            <div class="card">
+                <h2>Session #{{ s.session_number }} <span class="status-badge status-{{ s.status }}">{{ s.status }}</span></h2>
+                {% if matches %}
+                <table>
+                    <thead><tr><th>Match</th><th>Status</th><th>Room</th><th>Started</th><th>Ended</th></tr></thead>
+                    <tbody>
+                        {% for g in matches %}
+                        <tr>
+                            <td><a href="/event/{{ event.id }}/game/{{ g.game_number }}">Match {{ loop.index }} (Game {{ g.game_number }})</a></td>
+                            <td><span class="status-badge status-{{ g.status }}">{{ g.status }}</span></td>
+                            <td>{{ g.room_code or 'N/A' }}</td>
+                            <td>{{ g.started_at[:16] if g.started_at else '-' }}</td>
+                            <td>{{ g.ended_at[:16] if g.ended_at else '-' }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="empty">No matches yet.</div>
+                {% endif %}
+                {% if board %}
+                <h3 style="margin-top:12px">Session Leaderboard</h3>
+                <table>
+                    <thead><tr><th>#</th><th>Player</th><th>Points</th><th>Kills</th><th>Wins</th><th>PP</th><th>Avg Place</th></tr></thead>
+                    <tbody>
+                        {% for row in board %}
+                        <tr{% if row.is_dq %} class="dq-row"{% endif %}>
+                            <td>{{ loop.index }}</td>
+                            <td>{{ row.username }}{% if row.is_dq %} DQ{% endif %}</td>
+                            <td>{{ row.total_points }}</td>
+                            <td>{{ row.total_kills }}</td>
+                            <td>{{ row.wins }}</td>
+                            <td>{{ row.placement_points }}</td>
+                            <td>{{ row.avg_placement if row.avg_placement is not none else '-' }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% endif %}
+            </div>
+            {% else %}
+            <div class="card"><div class="empty">No sessions yet — create one to start running matches.</div></div>
+            {% endfor %}
+        </div>
+
+        <div id="tab-leaderboard" class="tab-content">
+            {% if event.team_size == 1 %}
+            <div class="card">
+                <h2>Solo Leaderboard</h2>
+                {% if solo_board %}
+                <table>
+                    <thead><tr><th>#</th><th>Player</th><th>Points</th><th>Kills</th></tr></thead>
+                    <tbody>
+                        {% for row in solo_board %}
+                        {% set ign = ign_map.get(row.discord_id, '') %}
+                        <tr{% if row.is_dq %} class="dq-row"{% endif %}>
+                            <td>{{ loop.index }}</td>
+                            <td{% if row.is_dq %} style="text-decoration:line-through"{% endif %}>{{ row.username }}{% if ign %} [{{ ign }}]{% endif %}{% if row.is_dq %} DQ{% endif %}</td>
+                            <td>{% if row.is_dq %}DQ{% else %}{{ row.total_points }}{% endif %}</td>
+                            <td>{% if row.is_dq %}DQ{% else %}{{ row.total_kills }}{% endif %}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="empty">No solo scores yet.</div>
+                {% endif %}
+            </div>
+            {% else %}
+            <div class="card">
+                <h2>Team Leaderboard</h2>
+                {% if team_board %}
+                <table>
+                    <thead><tr><th>#</th><th>Players</th><th>Points</th><th>Kills</th></tr></thead>
+                    <tbody>
+                        {% for row in team_board %}
+                        {% set lead_ign = ign_map.get(row.lead_id, '') %}
+                        <tr{% if row.is_dq %} class="dq-row"{% endif %}>
+                            <td>{{ loop.index }}</td>
+                            <td{% if row.is_dq %} style="text-decoration:line-through"{% endif %}>
+                                {{ row.team_name }} {% if lead_ign %}[{{ lead_ign }}]{% endif %}
+                                {% if row.team_members %}
+                                    , {% for mid in row.team_members.split(',') %}{% set m_name = player_map.get(mid, mid) %}{% set m_ign = ign_map.get(mid, '') %}{{ m_name }}{% if m_ign %} [{{ m_ign }}]{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+                                {% endif %}{% if row.is_dq %} DQ{% endif %}
+                            </td>
+                            <td>{% if row.is_dq %}DQ{% else %}{{ row.total_points }}{% endif %}</td>
+                            <td>{% if row.is_dq %}DQ{% else %}{{ row.total_kills }}{% endif %}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="empty">No team scores yet.</div>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+
+    </div>
+
+    <script>
+    var EVENT_ID = {{ event.id }};
+
+    $('.tab-btn').on('click', function() {
+        var tab = $(this).data('tab');
+        $('.tab-btn').removeClass('active');
+        $('.tab-content').removeClass('active');
+        $(this).addClass('active');
+        $('#tab-' + tab).addClass('active');
+    });
+
+    $('#kill-feed-form').on('submit', function(e) {
+        e.preventDefault();
+        var $form = $(this);
+        $.post('/event/' + EVENT_ID + '/ajax/dispatch-kill', $form.serialize(), function(r) {
+            if (r.ok) alert('Kill dispatched!');
+            $form.find('input[name="weapon"]').val('');
+        }).fail(function(xhr) {
+            var msg = 'Error';
+            try { msg = JSON.parse(xhr.responseText).error; } catch(e) {}
+            alert(msg);
+        });
+    });
+
+    $('#placement-scale-form').on('submit', function(e) {
+        e.preventDefault();
+        var val = $('#placement-scale').val().trim();
+        $.ajax({
+            url: '/event/' + EVENT_ID + '/ajax/update-points',
+            method: 'POST',
+            data: { placement_scale: val },
+            success: function(r) {
+                $('#scale-status').text('Saved').css('color', '#27ae60');
+                setTimeout(function() { $('#scale-status').text(''); }, 2000);
+            },
+            error: function() {
+                $('#scale-status').text('Error saving').css('color', '#e74c3c');
+            }
+        });
+    });
+
+    $('.session-end-match-form').on('submit', function(e) {
+        if (!confirm('End the current match and start the next one?')) e.preventDefault();
+    });
+
+    $('.session-end-form').on('submit', function(e) {
+        if (!confirm('End this session and post its final leaderboard?')) e.preventDefault();
+    });
+
+    $(document).on('click', '.ajax-qualify', function(e) {
+        e.preventDefault();
+        var $btn = $(this);
+        var did = $btn.data('discord');
+        $.post('/event/' + EVENT_ID + '/ajax/qualify', {discord_id: did}, function(r) {
+            if (r.ok) {
+                if (r.qualified) {
+                    $btn.removeClass('btn-secondary').addClass('btn-warning');
+                    $btn.text('⭐ Qualified');
+                } else {
+                    $btn.removeClass('btn-warning').addClass('btn-secondary');
+                    $btn.text('⭐ Qualify');
+                }
+            } else {
+                alert(r.error || 'Error');
+            }
+        }).fail(function(xhr) {
+            var msg = 'Error';
+            try { msg = JSON.parse(xhr.responseText).error; } catch(e) {}
+            alert(msg);
+        });
+    });
+    </script>
+</body>
+</html>

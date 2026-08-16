@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Players — Scrim Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <h1>Scrim Dashboard</h1>
+            <div>
+                <a href="/">Events</a> &nbsp;|&nbsp;
+                <a href="/players">Players</a> &nbsp;|&nbsp;
+                <a href="/bans">Bans</a>
+            </div>
+        </div>
+    </header>
+    <div class="container">
+
+        {% if detail %}
+        <div class="card">
+            <h2>Player Profile — {{ detail.player.username }}</h2>
+            <div class="form-row">
+                <div>
+                    <label>PR</label>
+                    <div style="font-size: 18px; font-weight: 700;">{{ detail.player.pr }}</div>
+                </div>
+                <div>
+                    <label>Rank</label>
+                    <div style="font-size: 18px; font-weight: 700;">{{ detail.rank }}</div>
+                </div>
+                <div>
+                    <label>Position</label>
+                    <div style="font-size: 18px; font-weight: 700;">#{{ detail.position }}</div>
+                </div>
+                <div>
+                    <label>Wins</label>
+                    <div style="font-size: 18px;">{{ detail.total_wins }}</div>
+                </div>
+                <div>
+                    <label>Kills</label>
+                    <div style="font-size: 18px;">{{ detail.total_kills }}</div>
+                </div>
+                <div>
+                    <label>Games</label>
+                    <div style="font-size: 18px;">{{ detail.total_games }}</div>
+                </div>
+            </div>
+            <p style="font-size: 12px; color: #777; margin-top: 8px;">
+                Discord ID: {{ detail.player.discord_id }} | IGN: {{ detail.player.game_username or 'Not set' }} | Game ID: {{ detail.player.game_id or 'Not set' }}
+            </p>
+            <h3 style="margin: 14px 0 8px 0; font-size: 13px; color: #2c3e50;">Edit player data</h3>
+            <form action="/player/{{ detail.player.discord_id }}/update" method="post" class="form-row">
+                <div>
+                    <label>Discord name</label>
+                    <input type="text" name="username" value="{{ detail.player.username or '' }}">
+                </div>
+                <div>
+                    <label>IGN</label>
+                    <input type="text" name="game_username" value="{{ detail.player.game_username or '' }}">
+                </div>
+                <div>
+                    <label>Game ID</label>
+                    <input type="text" name="game_id" value="{{ detail.player.game_id or '' }}">
+                </div>
+                <div>
+                    <label>Country</label>
+                    <input type="text" name="country" value="{{ detail.player.country or '' }}">
+                </div>
+                <div>
+                    <label>Region</label>
+                    <input type="text" name="region" value="{{ detail.player.region or '' }}">
+                </div>
+                <div style="align-self: flex-end;">
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </div>
+            </form>
+            <h3 style="margin: 14px 0 8px 0; font-size: 13px; color: #2c3e50;">Event History (completed events)</h3>
+            {% if detail.history %}
+            <table>
+                <thead>
+                    <tr><th>Event</th><th>Format</th><th>Region</th><th>Games</th><th>Wins</th><th>Kills</th></tr>
+                </thead>
+                <tbody>
+                    {% for h in detail.history %}
+                    <tr>
+                        <td><a href="/event/{{ h.id }}">{{ h.name }}</a></td>
+                        <td>{{ h.event_format }} ({{ ['Solo','Duo','Trio'][h.team_size - 1] }})</td>
+                        <td>{{ h.region }}</td>
+                        <td>{{ h.games }}</td>
+                        <td>{{ h.wins }}</td>
+                        <td>{{ h.kills }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty">No completed events yet.</div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <div class="card">
+            <h2>All Players ({{ players|length }}) <a href="/players/export" class="btn btn-secondary btn-sm" style="float:right;">⬇ Export CSV</a></h2>
+            {% if players %}
+            <table>
+                <thead>
+                    <tr><th>#</th><th>Username</th><th>IGN</th><th>PR</th><th>Wins</th><th>Kills</th><th>Games</th><th></th></tr>
+                </thead>
+                <tbody>
+                    {% for p in players %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ p.username }}</td>
+                        <td>{{ p.game_username or '—' }}</td>
+                        <td>{{ p.pr }}</td>
+                        <td>{{ p.total_wins }}</td>
+                        <td>{{ p.total_kills }}</td>
+                        <td>{{ p.total_games }}</td>
+                        <td><a href="/player/{{ p.discord_id }}" class="btn btn-primary btn-sm">Profile</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty">No players yet.</div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ player.username }} — Scrim Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <h1>Scrim Dashboard</h1>
+            <div>
+                <a href="/">Events</a> &nbsp;|&nbsp;
+                <a href="/players">Players</a> &nbsp;|&nbsp;
+                <a href="/leaderboard">Leaderboard</a> &nbsp;|&nbsp;
+                <a href="/compare">Compare</a> &nbsp;|&nbsp;
+                <a href="/search">Search</a> &nbsp;|&nbsp;
+                <a href="/bans">Bans</a>
+            </div>
+        </div>
+    </header>
+    <div class="container">
+
+        <div class="card">
+            <h2>{{ player.username }}</h2>
+            <div class="form-row">
+                <div>
+                    <label>PR</label>
+                    <div style="font-size: 18px; font-weight: 700;">{{ player.pr }}</div>
+                </div>
+                <div>
+                    <label>Rank</label>
+                    <div style="font-size: 18px; font-weight: 700;">{{ profile.rank }}</div>
+                </div>
+                <div>
+                    <label>Position</label>
+                    <div style="font-size: 18px; font-weight: 700;">#{{ profile.position }}</div>
+                </div>
+                <div>
+                    <label>Wins</label>
+                    <div style="font-size: 18px;">{{ profile.total_wins }}</div>
+                </div>
+                <div>
+                    <label>Kills</label>
+                    <div style="font-size: 18px;">{{ profile.total_kills }}</div>
+                </div>
+                <div>
+                    <label>Games</label>
+                    <div style="font-size: 18px;">{{ profile.total_games }}</div>
+                </div>
+                <div>
+                    <label>Avg Placement</label>
+                    <div style="font-size: 18px;">{{ profile.avg_placement or '-' }}</div>
+                </div>
+            </div>
+            <p style="font-size: 12px; color: #777; margin-top: 8px;">
+                Discord ID: {{ player.discord_id }} | IGN: {{ player.game_username or 'Not set' }} | Game ID: {{ player.game_id or 'Not set' }}
+                {% if player.country %} | Country: {{ player.country }}{% endif %}
+                {% if player.region %} | Region: {{ player.region }}{% endif %}
+            </p>
+            <p><a class="btn btn-primary btn-sm" href="/compare?p1={{ player.discord_id }}">Compare</a></p>
+        </div>
+
+        <div class="card">
+            <h2>Points per Event</h2>
+            <canvas id="points-chart" height="90"></canvas>
+        </div>
+
+        <div class="card">
+            <h2>Average Placement per Event</h2>
+            <canvas id="placement-chart" height="90"></canvas>
+        </div>
+
+        <div class="card">
+            <h2>Event History ({{ profile.history | length }})</h2>
+            {% if profile.history %}
+            <table>
+                <thead><tr><th>Event</th><th>Format</th><th>Games</th><th>Wins</th><th>Kills</th><th>Points</th><th>Avg Place</th></tr></thead>
+                <tbody>
+                    {% for h in profile.history %}
+                    <tr>
+                        <td><a href="/event/{{ h.id }}">{{ h.name }}</a></td>
+                        <td>{{ h.event_format }} / {{ h.region }}</td>
+                        <td>{{ h.games }}</td>
+                        <td>{{ h.wins }}</td>
+                        <td>{{ h.kills }}</td>
+                        <td>{{ h.points }}</td>
+                        <td>{{ h.avg_placement or '-' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty">No completed events yet.</div>
+            {% endif %}
+        </div>
+
+    </div>
+
+    <script>
+    var events = {{ profile.history | map(attribute='name') | list | tojson }};
+    var points = {{ profile.history | map(attribute='points') | list | tojson }};
+    var placements = {{ profile.history | map(attribute='avg_placement') | list | tojson }};
+
+    new Chart(document.getElementById('points-chart'), {
+        type: 'line',
+        data: { labels: events, datasets: [{ label: 'Points', data: points, borderColor: '#3498db', backgroundColor: 'rgba(52,152,219,0.1)', tension: 0.3 }] },
+        options: { responsive: true, plugins: { legend: { display: false } } }
+    });
+
+    new Chart(document.getElementById('placement-chart'), {
+        type: 'line',
+        data: { labels: events, datasets: [{ label: 'Avg Placement', data: placements, borderColor: '#e67e22', backgroundColor: 'rgba(230,126,34,0.1)', tension: 0.3 }] },
+        options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { reverse: true, title: { display: true, text: 'Placement (lower is better)' } } } }
+    });
+    </script>
+</body>
+</html>

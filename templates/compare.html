@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Compare Players — Scrim Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <h1>Scrim Dashboard</h1>
+            <div>
+                <a href="/">Events</a> &nbsp;|&nbsp;
+                <a href="/players">Players</a> &nbsp;|&nbsp;
+                <a href="/leaderboard">Leaderboard</a> &nbsp;|&nbsp;
+                <a href="/compare">Compare</a> &nbsp;|&nbsp;
+                <a href="/search">Search</a> &nbsp;|&nbsp;
+                <a href="/bans">Bans</a>
+            </div>
+        </div>
+    </header>
+    <div class="container">
+
+        <div class="card">
+            <h2>Compare Players</h2>
+            <form method="get" action="/compare" class="form-row">
+                <div>
+                    <label>Player 1</label>
+                    <input type="text" name="p1" id="p1" value="{{ p1 }}" list="player-list1" placeholder="Discord ID or pick below">
+                </div>
+                <div>
+                    <label>Player 2</label>
+                    <input type="text" name="p2" id="p2" value="{{ p2 }}" list="player-list2" placeholder="Discord ID or pick below">
+                </div>
+                <div style="align-self:flex-end;">
+                    <button type="submit" class="btn btn-primary btn-sm">Compare</button>
+                </div>
+            </form>
+            <datalist id="player-list1">{% for pl in players %}<option value="{{ pl.discord_id }}">{{ pl.username }}{% if pl.game_username %} [{{ pl.game_username }}]{% endif %}</option>{% endfor %}</datalist>
+            <datalist id="player-list2">{% for pl in players %}<option value="{{ pl.discord_id }}">{{ pl.username }}{% if pl.game_username %} [{{ pl.game_username }}]{% endif %}</option>{% endfor %}</datalist>
+        </div>
+
+        {% if left and right %}
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th><a href="/account/{{ left.player.discord_id }}">{{ left.player.username }}</a></th>
+                        <th><a href="/account/{{ right.player.discord_id }}">{{ right.player.username }}</a></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><strong>IGN</strong></td><td>{{ left.player.game_username or '-' }}</td><td>{{ right.player.game_username or '-' }}</td></tr>
+                    <tr><td><strong>PR</strong></td><td>{{ left.player.pr }}</td><td>{{ right.player.pr }}</td></tr>
+                    <tr><td><strong>Rank</strong></td><td>{{ left.rank }}</td><td>{{ right.rank }}</td></tr>
+                    <tr><td><strong>Position</strong></td><td>#{{ left.position }}</td><td>#{{ right.position }}</td></tr>
+                    <tr><td><strong>Wins</strong></td><td>{{ left.total_wins }}</td><td>{{ right.total_wins }}</td></tr>
+                    <tr><td><strong>Kills</strong></td><td>{{ left.total_kills }}</td><td>{{ right.total_kills }}</td></tr>
+                    <tr><td><strong>Games</strong></td><td>{{ left.total_games }}</td><td>{{ right.total_games }}</td></tr>
+                    <tr><td><strong>Avg Placement</strong></td><td>{{ left.avg_placement or '-' }}</td><td>{{ right.avg_placement or '-' }}</td></tr>
+                </tbody>
+            </table>
+        </div>
+        {% elif p1 or p2 %}
+        <div class="card"><div class="empty">Select two players that have stats to compare.</div></div>
+        {% else %}
+        <div class="card"><div class="empty">Pick two players above.</div></div>
+        {% endif %}
+
+    </div>
+</body>
+</html>
