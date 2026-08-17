@@ -63,6 +63,7 @@ def _bump_epoch() -> None:
     _close_all_connections()
     if getattr(_local, "conn", None) is not None:
         _local.conn = None
+    init_db()
 
 
 def reload_db_if_needed() -> bool:
