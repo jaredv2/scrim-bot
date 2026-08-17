@@ -13,7 +13,6 @@ from templates_fmt import (
     end_tournament,
     role_ping,
     team_size_label,
-    to_unix_ts,
 )
 
 from database import (
@@ -61,17 +60,11 @@ class EventsCog(commands.Cog):
         team_size="Team size (1=solo, 2=duo, 3=trio, 4=squad)",
         total_games="Number of games (0 = unlimited session)",
         max_players="Max players",
-        region="Region (EU, NA, ASIA, etc.)",
         event_format="Format (ZoneWars, BoxFights, BattleRoyale, etc.)",
-        start_time="Start time (e.g. 3:00 PM EST)",
         point_kill="Points per elimination",
         point_win="Points for victory",
         placement_scale="Placement points (comma-separated, e.g. 10,8,6,4,2,1)",
         qualification="Enable the qualified-players system (players can qualify, move to other events without re-registering)",
-        place_1="1st place prize/label (optional, shown in announcement)",
-        place_2="2nd place prize/label (optional, shown in announcement)",
-        place_3="3rd place prize/label (optional, shown in announcement)",
-        place_4plus="4th place+ prize/label (optional, shown in announcement)",
         pr_multiplier="PR multiplier override (0 = auto based on player count)",
         shoot_timer="Shoot timer in seconds (0 = none), shown in game DMs",
         dispatch="Post a dispatch message (with room code) immediately after creation",
@@ -123,9 +116,7 @@ class EventsCog(commands.Cog):
         qualifier_top: int = 0,
         qualifier_target: int = 0,
         qualifier_division: str = "",
-        region: str = "EU",
         event_format: str = "ZoneWars",
-        start_time: str = "TBD",
         team_size: int = 1,
         total_games: int = 0,
         max_players: int = 100,
@@ -133,10 +124,6 @@ class EventsCog(commands.Cog):
         point_win: int = 5,
         placement_scale: str = "10,8,6,4,2,1",
         qualification: bool = False,
-        place_1: str = "",
-        place_2: str = "",
-        place_3: str = "",
-        place_4plus: str = "",
         pr_multiplier: float = 0.0,
         shoot_timer: int = 0,
         dispatch: bool = False,
@@ -236,19 +223,15 @@ class EventsCog(commands.Cog):
             team_size=team_size,
             total_games=total_games,
             max_players=max_players,
-            region=region,
+            region="EU",
             event_format=event_format,
             point_kill=point_kill,
             point_win=point_win,
             placement_scale=ps_json,
             qualification_enabled=1 if qualification else 0,
-            place_1=place_1.strip() or None,
-            place_2=place_2.strip() or None,
-            place_3=place_3.strip() or None,
-            place_4plus=place_4plus.strip() or None,
             pr_multiplier=pr_multiplier if pr_multiplier > 0 else None,
             shoot_timer=shoot_timer if shoot_timer > 0 else 0,
-            scheduled_at=to_unix_ts(start_time) or None,
+            scheduled_at=None,
             event_type=event_type,
             entry_mode=entry_mode,
             pr_cap=pr_cap if pr_cap > 0 else None,
@@ -285,15 +268,11 @@ class EventsCog(commands.Cog):
             text = cup_announcement(
                 name=name,
                 format_label=team_label,
-                region=region,
-                start_time=start_time,
+                region="EU",
+                start_time="TBD",
                 point_kill=point_kill,
                 point_win=point_win,
                 ping_role=role_ping(settings.discord_tournament_role_id),
-                place_1=place_1.strip() or None,
-                place_2=place_2.strip() or None,
-                place_3=place_3.strip() or None,
-                place_4plus=place_4plus.strip() or None,
             )
             await channel.send(text)
 
@@ -338,10 +317,14 @@ class EventsCog(commands.Cog):
         )
 
         if dispatch:
+            scale_str = ", ".join(
+                x.strip() for x in placement_scale.split(",") if x.strip()
+            )
             dispatch_msg = (
                 f"**{team_size_label(team_size)} Scrim**\n"
                 f"Format: {event_format}\n"
-                f"Region: {region}\n"
+                f"Placements: **{scale_str}**\n"
+                f"Region: EU\n"
                 f"Code: **{room_code.strip() or 'TBD'}**\n"
                 + (
                     role_ping(settings.discord_scrim_role_id)

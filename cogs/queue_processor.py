@@ -628,7 +628,7 @@ class CommandQueueCog(commands.Cog):
             dq = " 🚫" if row.get("is_dq") else ""
             lines.append(
                 f"{medal} **{name}** — {row['total_points']} pts ({row['total_kills']} kills) "
-                f"| {row.get('wins', 0)}W | avg {row.get('avg_points', 0)} pts "
+                f"| {row.get('wins', 0)}W | avg #{row.get('avg_placement') or '—'} "
                 f"| {row.get('placement_points', 0)} pp{dq}"
             )
 
@@ -868,7 +868,7 @@ class CommandQueueCog(commands.Cog):
             else:
                 lines.append(
                     f"{medal} **{name}** — {row['total_points']} pts ({row['total_kills']} kills) "
-                    f"| {row.get('wins', 0)}W | avg {row.get('avg_points', 0)} pts "
+                    f"| {row.get('wins', 0)}W | avg #{row.get('avg_placement') or '—'} "
                     f"| {pl_str} | {row.get('placement_points', 0)} pp"
                 )
 
@@ -894,6 +894,10 @@ class CommandQueueCog(commands.Cog):
         pr_map = calc_event_pr(ev["id"])
         for did, pr_val in pr_map.items():
             execute("UPDATE players SET pr = ? WHERE discord_id = ?", (pr_val, did))
+
+        from database import record_event_wins
+
+        record_event_wins(ev["id"])
 
         team_size = ev.get("team_size", 1)
         if team_size >= 2:
@@ -935,7 +939,7 @@ class CommandQueueCog(commands.Cog):
                     lines.append(
                         f"{medal} {name} — "
                         f"{row['total_points']} pts ({row['total_kills']} kills) "
-                        f"| {row.get('wins', 0)}W | avg {row.get('avg_points', 0)} pts "
+                        f"| {row.get('wins', 0)}W | avg #{row.get('avg_placement') or '—'} "
                         f"| {pl_str} | {row.get('placement_points', 0)} pp"
                     )
                 embed.description = "\n".join(lines)

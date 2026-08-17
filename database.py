@@ -297,6 +297,15 @@ CREATE TABLE IF NOT EXISTS event_interests (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(event_id, discord_id)
 );
+
+CREATE TABLE IF NOT EXISTS event_wins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER REFERENCES events(id) NOT NULL,
+    player_id INTEGER NOT NULL,
+    season INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(event_id, player_id)
+);
 """
 
 DEFAULT_RANK_TIERS = [
@@ -918,6 +927,12 @@ def _parse_placement_scale(ev: dict) -> list[int]:
 def _enrich_rows(ev: dict | None, rows: list[dict], counts: list[dict], placements: list[dict]) -> list[dict]:
     """Attach derived per-player stats (wins, placement points, averages) to leaderboard rows."""
     scale = _parse_placement_scale(ev) if ev else []
+    season = 1
+    if ev:
+        g = query_one(
+            "SELECT season FROM games WHERE event_id = ? LIMIT 1", (ev["id"],)
+        )
+        season = g["season"] if g else 1
     cnt_map = {c["player_id"]: c["cnt"] for c in counts}
     plc_map = {}
     for p in placements:
@@ -927,7 +942,7 @@ def _enrich_rows(ev: dict | None, rows: list[dict], counts: list[dict], placemen
         games_played = cnt_map.get(row["id"], 0)
         pls = plc_map.get(row["id"], [])
         row["games_played"] = games_played
-        row["wins"] = sum(1 for p in pls if p == 1)
+        row["wins"] = sum(1 for p in pls if p == 1) + get_event_wins_count(row["id"], season)
         row["placements"] = pls
         row["placement_points"] = sum(
             scale[p - 1] for p in pls if 1 <= p <= len(scale)
@@ -1086,6 +1101,24 @@ def get_team_leaderboard(event_id: int) -> list[dict]:
         })
 
     result.sort(key=lambda x: (x["is_dq"], -x["total_points"]))
+
+    g = query_one("SELECT season FROM games WHERE event_id = ? LIMIT 1", (event_id,))
+    season = g["season"] if g else 1
+    for reg_row in result:
+        ids = [reg_row["lead_id"]]
+        ids += [
+            m.strip()
+            for m in (reg_row.get("team_members") or "").split(",")
+            if m.strip()
+        ]
+        ph = ",".join(["?"] * len(ids))
+        ew = query_one(
+            f"SELECT COUNT(DISTINCT ew.event_id) AS c FROM event_wins ew "
+            f"JOIN players p ON ew.player_id = p.id "
+            f"WHERE p.discord_id IN ({ph}) AND ew.season = ?",
+            (*ids, season),
+        )
+        reg_row["wins"] = (reg_row.get("wins") or 0) + (ew["c"] if ew else 0)
     return result
 
 
@@ -1217,6 +1250,50 @@ def get_bot_logs(event_id: int | None = None, limit: int = 50) -> list[dict]:
     )
 
 
+def get_event_wins_count(player_id: int, season: int) -> int:
+    row = query_one(
+        "SELECT COUNT(*) AS c FROM event_wins WHERE player_id = ? AND season = ?",
+        (player_id, season),
+    )
+    return row["c"] if row else 0
+
+
+def record_event_wins(event_id: int) -> None:
+    """Credit +1 win to every player on the winning side of a completed event."""
+    ev = get_event(event_id)
+    if not ev or ev.get("status") != "completed":
+        return
+    if (ev.get("event_type") or "cup") == "bracket":
+        return
+    if ev.get("team_size", 1) >= 2:
+        board = get_team_leaderboard(event_id)
+    else:
+        board = get_leaderboard(event_id)
+    if not board or board[0].get("is_dq"):
+        return
+
+    top = board[0]
+    dids = [top["discord_id"]] if top.get("discord_id") else []
+    if ev.get("team_size", 1) >= 2:
+        dids = [top["lead_id"]] if top.get("lead_id") else []
+        dids += [
+            m.strip()
+            for m in (top.get("team_members") or "").split(",")
+            if m.strip()
+        ]
+
+    g = query_one("SELECT season FROM games WHERE event_id = ? LIMIT 1", (event_id,))
+    season = g["season"] if g else get_season()
+    for did in dids:
+        p = query_one("SELECT id FROM players WHERE discord_id = ?", (did,))
+        if not p:
+            continue
+        execute(
+            "INSERT OR IGNORE INTO event_wins (event_id, player_id, season) VALUES (?, ?, ?)",
+            (event_id, p["id"], season),
+        )
+
+
 def get_player_stats(
     discord_id: str,
     event_id: int | None = None,
@@ -1254,9 +1331,10 @@ def get_player_stats(
             (player["id"], season),
         )
 
+    event_wins = get_event_wins_count(player["id"], season) if not event_id else 0
     return {
         "player": player,
-        "total_wins": stats["total_wins"] if stats else 0,
+        "total_wins": (stats["total_wins"] if stats else 0) + event_wins,
         "total_kills": stats["total_kills"] if stats else 0,
         "total_games": stats["total_games"] if stats else 0,
         "avg_placement": stats["avg_placement"] if stats and stats["avg_placement"] is not None else None,
@@ -1660,7 +1738,12 @@ def get_session_leaderboard(session_id: int) -> list[dict]:
     for row in rows:
         pls = plc_map.get(row["id"], [])
         row["games_played"] = len(pls)
-        row["wins"] = sum(1 for p in pls if p == 1)
+        g = query_one(
+            "SELECT season FROM games WHERE session_id = ? LIMIT 1", (session_id,)
+        )
+        row["wins"] = sum(1 for p in pls if p == 1) + get_event_wins_count(
+            row["id"], g["season"] if g else 1
+        )
         row["placements"] = pls
         row["placement_points"] = sum(
             scale[p - 1] for p in pls if 1 <= p <= len(scale)
@@ -1678,7 +1761,8 @@ def get_players_leaderboard(season: int | None = None) -> list[dict]:
     return query(
         "SELECT p.discord_id, p.username, p.game_username, p.game_id, p.country, p.region, "
         "p.pr, p.total_pr, "
-        "COUNT(CASE WHEN gp.placement = 1 AND e.status = 'completed' THEN 1 END) AS total_wins, "
+        "(COUNT(CASE WHEN gp.placement = 1 AND e.status = 'completed' THEN 1 END) "
+        "+ (SELECT COUNT(*) FROM event_wins ew WHERE ew.player_id = p.id AND ew.season = ?)) AS total_wins, "
         "COALESCE(SUM(CASE WHEN e.status = 'completed' THEN gp.kills END), 0) AS total_kills, "
         "COUNT(CASE WHEN e.status = 'completed' THEN gp.id END) AS total_games, "
         "ROUND(AVG(CASE WHEN e.status = 'completed' THEN gp.placement END), 1) AS avg_placement "
@@ -1688,7 +1772,7 @@ def get_players_leaderboard(season: int | None = None) -> list[dict]:
         "LEFT JOIN events e ON g.event_id = e.id "
         "GROUP BY p.id "
         "ORDER BY p.pr DESC, total_wins DESC, total_kills DESC, p.username ASC",
-        (season,),
+        (season, season),
     )
 
 

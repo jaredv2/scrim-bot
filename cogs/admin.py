@@ -291,7 +291,7 @@ class AdminCog(commands.Cog):
             else:
                 lines.append(
                     f"{medal} **{name}** — {row['total_points']} pts ({row['total_kills']} kills) "
-                    f"| {row.get('wins', 0)}W | avg {row.get('avg_points', 0)} pts "
+                    f"| {row.get('wins', 0)}W | avg #{row.get('avg_placement') or '—'} "
                     f"| {pl_str} | {row.get('placement_points', 0)} pp"
                 )
 

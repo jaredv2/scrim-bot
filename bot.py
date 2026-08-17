@@ -220,7 +220,7 @@ class ScrimBot(commands.Bot):
     async def _on_app_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ) -> None:
-        if isinstance(error, app_commands.TransformedTransformerError):
+        if isinstance(error, app_commands.TransformerError):
             msg = f"**Invalid argument type:** {error}"
         elif isinstance(error, app_commands.CommandInvokeError):
             msg = f"**Command error:** {error.original}"
