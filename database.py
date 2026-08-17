@@ -567,6 +567,98 @@ def _migrate(conn: sqlite3.Connection) -> None:
             ")"
         )
 
+    # --- Phase 1 architecture rework: event typing + cup options ---
+    ev_cols = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "event_type" not in ev_cols:
+        _add_col(conn, "ALTER TABLE events ADD COLUMN event_type TEXT DEFAULT 'cup'")
+    if "entry_mode" not in ev_cols:
+        _add_col(conn, "ALTER TABLE events ADD COLUMN entry_mode TEXT DEFAULT 'open'")
+    if "pr_cap" not in ev_cols:
+        _add_col(conn, "ALTER TABLE events ADD COLUMN pr_cap INTEGER")
+    if "required_division_id" not in ev_cols:
+        _add_col(conn, "ALTER TABLE events ADD COLUMN required_division_id INTEGER")
+    if "scoring_mode" not in ev_cols:
+        _add_col(conn, "ALTER TABLE events ADD COLUMN scoring_mode TEXT DEFAULT 'normal'")
+    if "awards_pr" not in ev_cols:
+        _add_col(conn, "ALTER TABLE events ADD COLUMN awards_pr INTEGER DEFAULT 1")
+    if "coins_enabled" not in ev_cols:
+        _add_col(conn, "ALTER TABLE events ADD COLUMN coins_enabled INTEGER DEFAULT 0")
+    if "qualifier_requirements" not in ev_cols:
+        _add_col(conn, "ALTER TABLE events ADD COLUMN qualifier_requirements TEXT")
+
+    lobby_cols = {row[1] for row in conn.execute("PRAGMA table_info(lobbies)")}
+    if "max_players" not in lobby_cols:
+        _add_col(conn, "ALTER TABLE lobbies ADD COLUMN max_players INTEGER DEFAULT 100")
+    if "lobby_number" not in lobby_cols:
+        _add_col(conn, "ALTER TABLE lobbies ADD COLUMN lobby_number INTEGER DEFAULT 1")
+    if "settings" not in lobby_cols:
+        _add_col(conn, "ALTER TABLE lobbies ADD COLUMN settings TEXT")
+    if "started_at" not in lobby_cols:
+        _add_col(conn, "ALTER TABLE lobbies ADD COLUMN started_at TIMESTAMP")
+    if "ended_at" not in lobby_cols:
+        _add_col(conn, "ALTER TABLE lobbies ADD COLUMN ended_at TIMESTAMP")
+
+    session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    if "lobby_id" not in session_cols:
+        _add_col(conn, "ALTER TABLE sessions ADD COLUMN lobby_id INTEGER")
+
+    gp_cols = {row[1] for row in conn.execute("PRAGMA table_info(game_players)")}
+    if "eliminated" not in gp_cols:
+        _add_col(conn, "ALTER TABLE game_players ADD COLUMN eliminated INTEGER DEFAULT 0")
+    if "eliminated_at" not in gp_cols:
+        _add_col(conn, "ALTER TABLE game_players ADD COLUMN eliminated_at TIMESTAMP")
+
+    if "divisions" not in tables:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS divisions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "name TEXT UNIQUE NOT NULL,"
+            "role_id TEXT,"
+            "guild_id TEXT,"
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        )
+    if "division_members" not in tables:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS division_members ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "division_id INTEGER REFERENCES divisions(id) NOT NULL,"
+            "discord_id TEXT NOT NULL,"
+            "qualified_from_event_id INTEGER,"
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+            "UNIQUE(division_id, discord_id)"
+            ")"
+        )
+    if "bracket_matches" not in tables:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS bracket_matches ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "event_id INTEGER REFERENCES events(id) NOT NULL,"
+            "round INTEGER NOT NULL DEFAULT 1,"
+            "position INTEGER NOT NULL DEFAULT 1,"
+            "player1_id INTEGER REFERENCES players(id),"
+            "player2_id INTEGER REFERENCES players(id),"
+            "winner_id INTEGER REFERENCES players(id),"
+            "status TEXT DEFAULT 'ready',"
+            "UNIQUE(event_id, round, position)"
+            ")"
+        )
+    if "duel_asks" not in tables:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS duel_asks ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "asker_id TEXT NOT NULL,"
+            "partner_id TEXT,"
+            "target_ids TEXT NOT NULL DEFAULT '[]',"
+            "status TEXT DEFAULT 'pending',"
+            "category_id TEXT,"
+            "text_channel_id TEXT,"
+            "voice_channel_id TEXT,"
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+            "expires_at INTEGER"
+            ")"
+        )
+
 
 def _seed_rank_tiers(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM rank_tiers")
@@ -713,7 +805,6 @@ def get_game_players(game_id: int) -> list[dict]:
 def get_game_team_leaderboard(game_id: int, event_id: int) -> list[dict]:
     registrations = query(
         "SELECT * FROM registrations WHERE event_id = ? AND status = 'confirmed' "
-        "AND team_members IS NOT NULL AND team_members != '' "
         "ORDER BY created_at",
         (event_id,),
     )
@@ -824,25 +915,10 @@ def _parse_placement_scale(ev: dict) -> list[int]:
         return []
 
 
-def _enrich_solo_leaderboard(event_id: int, rows: list[dict]) -> list[dict]:
-    ev = get_event(event_id)
+def _enrich_rows(ev: dict | None, rows: list[dict], counts: list[dict], placements: list[dict]) -> list[dict]:
+    """Attach derived per-player stats (wins, placement points, averages) to leaderboard rows."""
     scale = _parse_placement_scale(ev) if ev else []
-
-    counts = query(
-        "SELECT gp.player_id, COUNT(gp.id) AS cnt "
-        "FROM game_players gp JOIN games g ON gp.game_id = g.id "
-        "WHERE g.event_id = ? GROUP BY gp.player_id",
-        (event_id,),
-    )
     cnt_map = {c["player_id"]: c["cnt"] for c in counts}
-
-    placements = query(
-        "SELECT gp.player_id, gp.placement "
-        "FROM game_players gp JOIN games g ON gp.game_id = g.id "
-        "WHERE g.event_id = ? AND gp.placement IS NOT NULL "
-        "ORDER BY g.game_number",
-        (event_id,),
-    )
     plc_map = {}
     for p in placements:
         plc_map.setdefault(p["player_id"], []).append(p["placement"])
@@ -863,6 +939,24 @@ def _enrich_solo_leaderboard(event_id: int, rows: list[dict]) -> list[dict]:
             else 0
         )
     return rows
+
+
+def _enrich_solo_leaderboard(event_id: int, rows: list[dict]) -> list[dict]:
+    ev = get_event(event_id)
+    counts = query(
+        "SELECT gp.player_id, COUNT(gp.id) AS cnt "
+        "FROM game_players gp JOIN games g ON gp.game_id = g.id "
+        "WHERE g.event_id = ? GROUP BY gp.player_id",
+        (event_id,),
+    )
+    placements = query(
+        "SELECT gp.player_id, gp.placement "
+        "FROM game_players gp JOIN games g ON gp.game_id = g.id "
+        "WHERE g.event_id = ? AND gp.placement IS NOT NULL "
+        "ORDER BY g.game_number",
+        (event_id,),
+    )
+    return _enrich_rows(ev, rows, counts, placements)
 
 
 def get_solo_leaderboard(event_id: int) -> list[dict]:
@@ -914,7 +1008,6 @@ def get_solo_leaderboard(event_id: int) -> list[dict]:
 def get_team_leaderboard(event_id: int) -> list[dict]:
     registrations = query(
         "SELECT * FROM registrations WHERE event_id = ? AND status = 'confirmed' "
-        "AND team_members IS NOT NULL AND team_members != '' "
         "ORDER BY created_at",
         (event_id,),
     )
@@ -1183,6 +1276,9 @@ def calc_event_pr(event_id: int) -> dict[str, float]:
     point_kill = ev.get("point_kill", 1) or 1
     point_win = ev.get("point_win", 5) or 5
     team_size = ev.get("team_size", 1) or 1
+    scoring_mode = ev.get("scoring_mode") or "normal"
+    if scoring_mode == "coins":
+        return {}
 
     is_team = team_size >= 2
     registrations = query(
@@ -1239,7 +1335,10 @@ def calc_event_pr(event_id: int) -> dict[str, float]:
                     total_kills += rows[0]["k"]
                     wins += rows[0]["w"]
 
-            raw_pr = total_points + (total_kills * point_kill) + (wins * point_win)
+            if scoring_mode == "placement_only":
+                raw_pr = total_points
+            else:
+                raw_pr = total_points + (total_kills * point_kill) + (wins * point_win)
             final_pr = raw_pr * multiplier / team_size
             result[reg["discord_id"]] = round(final_pr, 1)
         return result
@@ -1263,7 +1362,10 @@ def calc_event_pr(event_id: int) -> dict[str, float]:
             else:
                 total_points = total_kills = wins = 0
 
-            raw_pr = total_points + (total_kills * point_kill) + (wins * point_win)
+            if scoring_mode == "placement_only":
+                raw_pr = total_points
+            else:
+                raw_pr = total_points + (total_kills * point_kill) + (wins * point_win)
             final_pr = raw_pr * multiplier
             result[did] = round(final_pr, 1)
         return result
@@ -1696,6 +1798,40 @@ def remove_player_from_event(event_id: int, discord_id: str) -> bool:
             )
 
     return True
+
+
+def remove_team_from_event(event_id: int, leader_discord_id: str) -> dict:
+    """Remove a whole team registration (leader + members) from an event,
+    including their lobby and game entries. Returns {removed_members, ok}."""
+    reg = query_one(
+        "SELECT * FROM registrations WHERE event_id = ? AND discord_id = ?",
+        (event_id, leader_discord_id),
+    )
+    if not reg:
+        return {"ok": False, "removed_members": 0}
+
+    members = [m.strip() for m in (reg["team_members"] or "").split(",") if m.strip()]
+    all_ids = [leader_discord_id] + members
+
+    for did in all_ids:
+        remove_player_from_event(event_id, did)
+
+    return {"ok": True, "removed_members": len(all_ids)}
+
+
+def reset_event_scores(event_id: int) -> int:
+    """Delete every game + game_players row for an event and reset its progress.
+    Returns how many games were deleted."""
+    games = get_event_games(event_id)
+    for g in games:
+        execute("DELETE FROM game_players WHERE game_id = ?", (g["id"],))
+        execute("DELETE FROM kills WHERE game_id = ?", (g["id"],))
+        execute("DELETE FROM games WHERE id = ?", (g["id"],))
+    execute(
+        "UPDATE events SET current_game = 0, status = 'registration' WHERE id = ?",
+        (event_id,),
+    )
+    return len(games)
 
 
 def get_bans() -> list[dict]:
@@ -2187,3 +2323,979 @@ def season_reset() -> int:
 def start_season() -> int:
     """Begin a new season without touching stats (announcement not dispatched yet)."""
     return bump_season()
+
+
+# ============================ Phase 1: new architecture core model ============================
+
+EVENT_TYPES = ("cup", "scrim", "bracket", "qualifier")
+ENTRY_MODES = ("open", "pr_limited", "division")
+SCORING_MODES = ("normal", "placement_only", "coins")
+
+EVENT_COLUMNS = {
+    "name", "status", "channel_id", "signup_channel_id", "updates_channel_id",
+    "dispatch_channel_id", "room_code", "region", "event_format", "max_players",
+    "team_size", "total_games", "current_game", "point_kill", "point_win",
+    "placement_scale", "qualification_enabled", "place_1", "place_2", "place_3",
+    "place_4plus", "pr_multiplier", "shoot_timer", "scheduled_at",
+    "event_type", "entry_mode", "pr_cap", "required_division_id",
+    "scoring_mode", "awards_pr", "coins_enabled", "qualifier_requirements",
+}
+
+
+def create_event_record(name: str, **fields) -> int:
+    """Insert an event using any whitelisted column values. Returns the new event id."""
+    allowed = {k: v for k, v in fields.items() if k in EVENT_COLUMNS}
+    allowed["name"] = name
+    cols = ", ".join(allowed)
+    placeholders = ", ".join(["?"] * len(allowed))
+    return execute(
+        f"INSERT INTO events ({cols}) VALUES ({placeholders})",
+        tuple(allowed.values()),
+    )
+
+
+# ------------------------------------------------------------------ entry checks
+
+
+def get_player_divisions(discord_id: str) -> list[dict]:
+    return query(
+        "SELECT d.* FROM division_members dm JOIN divisions d ON dm.division_id = d.id "
+        "WHERE dm.discord_id = ? ORDER BY d.name",
+        (discord_id,),
+    )
+
+
+def get_player_division_ids(discord_id: str) -> list[int]:
+    return [d["id"] for d in get_player_divisions(discord_id)]
+
+
+def get_event_qualifier_sources(event_id: int) -> list[int]:
+    """Qualifier events that gate entry into `event_id` (via qualifier_requirements.target_event_id)."""
+    sources = []
+    for ev in query(
+        "SELECT id, qualifier_requirements FROM events "
+        "WHERE event_type = 'qualifier' AND qualifier_requirements IS NOT NULL"
+    ):
+        try:
+            req = json.loads(ev["qualifier_requirements"]) or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if int(req.get("target_event_id") or 0) == event_id:
+            sources.append(ev["id"])
+    return sources
+
+
+def check_event_entry(event_id: int, discord_id: str) -> dict:
+    """Entry validation for a cup/bracket: PR cap, required division, qualifier gating.
+    Returns {"ok": True} or {"ok": False, "reason": "..."}."""
+    ev = get_event(event_id)
+    if not ev:
+        return {"ok": False, "reason": "Event not found."}
+    if (ev.get("event_type") or "cup") == "scrim":
+        return {"ok": True}
+
+    mode = ev.get("entry_mode") or "open"
+    if mode == "pr_limited":
+        cap = ev.get("pr_cap")
+        if cap:
+            p = query_one("SELECT pr FROM players WHERE discord_id = ?", (discord_id,))
+            pr = (p["pr"] if p else 0) or 0
+            if pr > cap:
+                return {
+                    "ok": False,
+                    "reason": f"Your PR (**{pr}**) exceeds the **{cap} PR** cap for this cup.",
+                }
+    if mode == "division":
+        div_id = ev.get("required_division_id")
+        if div_id and int(div_id) not in get_player_division_ids(discord_id):
+            div = get_division(int(div_id))
+            label = f"the **{div['name']}** division" if div else "a specific division"
+            return {"ok": False, "reason": f"This cup requires {label} to enter."}
+
+    for src in get_event_qualifier_sources(event_id):
+        q = query_one(
+            "SELECT 1 FROM event_qualifiers WHERE event_id = ? AND discord_id = ?",
+            (src, discord_id),
+        )
+        if not q:
+            src_ev = get_event(src)
+            name = src_ev["name"] if src_ev else "the qualifier"
+            return {
+                "ok": False,
+                "reason": f"You must qualify via **{name}** to join this cup.",
+            }
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ lobbies
+
+
+def _create_lobby_with_players(
+    event_id: int, lobby_number: int, max_players: int, discord_ids: list[str]
+) -> dict:
+    name = f"Lobby {lobby_number}"
+    lid = execute(
+        "INSERT INTO lobbies (event_id, name, lobby_number, max_players, status) "
+        "VALUES (?, ?, ?, ?, 'open')",
+        (event_id, name, lobby_number, max_players),
+    )
+    for did in discord_ids:
+        p = query_one("SELECT id FROM players WHERE discord_id = ?", (did,))
+        if p:
+            execute(
+                "INSERT OR IGNORE INTO lobby_players (lobby_id, player_id) VALUES (?, ?)",
+                (lid, p["id"]),
+            )
+    return get_lobby(lid)
+
+
+def auto_split_lobbies(event_id: int, force: bool = False) -> list[dict]:
+    """Split confirmed registrations into lobbies when seats exceed the event cap.
+    Teams stay together (a team too big for the cap gets its own lobby).
+    Returns the lobby rows ([] when no split is needed)."""
+    ev = get_event(event_id)
+    if not ev:
+        return []
+    max_players = int(ev.get("max_players") or 100)
+    if max_players <= 0:
+        return []
+    regs = get_event_registrations(event_id)
+    if not regs:
+        return []
+
+    seats = []
+    for reg in regs:
+        members = [reg["discord_id"]]
+        members += [m.strip() for m in (reg.get("team_members") or "").split(",") if m.strip()]
+        seats.append((reg["discord_id"], members))
+    if sum(len(members) for _, members in seats) <= max_players:
+        return []
+
+    existing = get_event_lobbies(event_id)
+    if existing and not force:
+        return existing
+    if force:
+        for l in existing:
+            execute("DELETE FROM lobby_players WHERE lobby_id = ?", (l["id"],))
+            execute("DELETE FROM lobbies WHERE id = ?", (l["id"],))
+
+    created = []
+    lobby_number = 0
+    cur: list[str] = []
+    cur_seats = 0
+    for _, members in seats:
+        if cur and cur_seats + len(members) > max_players:
+            lobby_number += 1
+            created.append(_create_lobby_with_players(event_id, lobby_number, max_players, cur))
+            cur, cur_seats = [], 0
+        if len(members) > max_players:
+            if cur:
+                lobby_number += 1
+                created.append(_create_lobby_with_players(event_id, lobby_number, max_players, cur))
+                cur, cur_seats = [], 0
+            lobby_number += 1
+            created.append(_create_lobby_with_players(event_id, lobby_number, max_players, members))
+            continue
+        cur.extend(members)
+        cur_seats += len(members)
+    if cur:
+        lobby_number += 1
+        created.append(_create_lobby_with_players(event_id, lobby_number, max_players, cur))
+    return created
+
+
+def _lobby_number_map(event_id: int) -> dict:
+    return {
+        lp["player_id"]: lp["lobby_number"]
+        for lp in query(
+            "SELECT lp.player_id, l.lobby_number FROM lobby_players lp "
+            "JOIN lobbies l ON lp.lobby_id = l.id WHERE l.event_id = ?",
+            (event_id,),
+        )
+    }
+
+
+def get_event_leaderboard_with_lobbies(event_id: int) -> list[dict]:
+    """Event-wide leaderboard; every player/team row is tagged with its lobby number
+    (None when the event has no lobbies)."""
+    ev = get_event(event_id)
+    if not ev:
+        return []
+    if (ev.get("team_size") or 1) >= 2:
+        rows = get_team_leaderboard(event_id)
+    else:
+        rows = get_leaderboard(event_id)
+    lobby_map = _lobby_number_map(event_id)
+    for row in rows:
+        lead_id = row.get("lead_id") or row.get("discord_id")
+        if lead_id:
+            p = query_one("SELECT id FROM players WHERE discord_id = ?", (lead_id,))
+            row["lobby_number"] = lobby_map.get(p["id"]) if p else None
+        else:
+            row["lobby_number"] = None
+    return rows
+
+
+def get_lobby_sessions(lobby_id: int) -> list[dict]:
+    return query(
+        "SELECT * FROM sessions WHERE lobby_id = ? ORDER BY session_number",
+        (lobby_id,),
+    )
+
+
+def get_lobby_active_session(lobby_id: int) -> dict | None:
+    return query_one(
+        "SELECT * FROM sessions WHERE lobby_id = ? AND status = 'in_progress' "
+        "ORDER BY session_number DESC LIMIT 1",
+        (lobby_id,),
+    )
+
+
+def get_lobby_matches(lobby_id: int) -> list[dict]:
+    return query(
+        "SELECT g.* FROM games g JOIN sessions s ON g.session_id = s.id "
+        "WHERE s.lobby_id = ? ORDER BY g.game_number",
+        (lobby_id,),
+    )
+
+
+def get_lobby_leaderboard(lobby_id: int) -> list[dict]:
+    """Player leaderboard accumulated across all matches of a lobby's sessions."""
+    lobby = get_lobby(lobby_id)
+    if not lobby:
+        return []
+    ev = get_event(lobby["event_id"])
+    rows = query(
+        "SELECT p.id, COALESCE(p.game_username, p.username) AS username, p.discord_id, "
+        "SUM(gp.points) AS total_points, "
+        "SUM(gp.kills) AS total_kills, "
+        "MAX(gp.is_disqualified) AS is_dq "
+        "FROM game_players gp "
+        "JOIN players p ON gp.player_id = p.id "
+        "JOIN games g ON gp.game_id = g.id "
+        "JOIN sessions s ON g.session_id = s.id "
+        "WHERE s.lobby_id = ? "
+        "GROUP BY p.id "
+        "ORDER BY is_dq ASC, total_points DESC",
+        (lobby_id,),
+    )
+    counts = query(
+        "SELECT gp.player_id, COUNT(gp.id) AS cnt "
+        "FROM game_players gp JOIN games g ON gp.game_id = g.id "
+        "JOIN sessions s ON g.session_id = s.id "
+        "WHERE s.lobby_id = ? GROUP BY gp.player_id",
+        (lobby_id,),
+    )
+    placements = query(
+        "SELECT gp.player_id, gp.placement "
+        "FROM game_players gp JOIN games g ON gp.game_id = g.id "
+        "JOIN sessions s ON g.session_id = s.id "
+        "WHERE s.lobby_id = ? AND gp.placement IS NOT NULL "
+        "ORDER BY g.game_number",
+        (lobby_id,),
+    )
+    return _enrich_rows(ev, rows, counts, placements)
+
+
+# ------------------------------------------------------------------ sessions & matches
+
+
+def create_session(event_id: int, lobby_id: int | None = None) -> dict:
+    """Create the next pending session for an event (or for one of its lobbies)."""
+    last = query_one(
+        "SELECT COALESCE(MAX(session_number), 0) AS n FROM sessions "
+        "WHERE event_id = ? AND lobby_id IS ?",
+        (event_id, lobby_id),
+    )
+    session_number = (last["n"] if last else 0) + 1
+    sid = execute(
+        "INSERT INTO sessions (event_id, session_number, status, lobby_id) "
+        "VALUES (?, ?, 'pending', ?)",
+        (event_id, session_number, lobby_id),
+    )
+    return get_session(sid)
+
+
+def create_match(
+    event_id: int,
+    session_id: int | None = None,
+    room_code: str = "",
+    status: str = "in_progress",
+) -> int:
+    """Create the next match (game) for an event, optionally inside a session.
+    Returns the new match id."""
+    row = query_one(
+        "SELECT COALESCE(MAX(game_number), 0) AS n FROM games WHERE event_id = ?",
+        (event_id,),
+    )
+    return create_game_record(
+        event_id, (row["n"] if row else 0) + 1, room_code, status, session_id
+    )
+
+
+def register_match_players(
+    match_id: int, event_id: int, lobby_id: int | None = None
+) -> int:
+    """Copy the source roster (lobby players when a lobby is given, else event
+    players) into a match. Returns the roster size after insertion."""
+    if lobby_id:
+        source = query(
+            "SELECT p.* FROM lobby_players lp JOIN players p ON lp.player_id = p.id "
+            "WHERE lp.lobby_id = ? ORDER BY lp.joined_at",
+            (lobby_id,),
+        )
+    else:
+        source = get_event_players(event_id)
+    for p in source:
+        execute(
+            "INSERT OR IGNORE INTO game_players (game_id, player_id) VALUES (?, ?)",
+            (match_id, p["id"]),
+        )
+    count = query_one(
+        "SELECT COUNT(*) AS c FROM game_players WHERE game_id = ?", (match_id,)
+    )
+    return count["c"] if count else 0
+
+
+def get_active_match(
+    session_id: int | None = None,
+    lobby_id: int | None = None,
+    event_id: int | None = None,
+) -> dict | None:
+    """The in-progress match for a session, lobby, or event (checked in that order)."""
+    if session_id:
+        return query_one(
+            "SELECT * FROM games WHERE session_id = ? AND status = 'in_progress' "
+            "ORDER BY game_number DESC LIMIT 1",
+            (session_id,),
+        )
+    if lobby_id:
+        return query_one(
+            "SELECT g.* FROM games g JOIN sessions s ON g.session_id = s.id "
+            "WHERE s.lobby_id = ? AND g.status = 'in_progress' "
+            "ORDER BY g.game_number DESC LIMIT 1",
+            (lobby_id,),
+        )
+    if event_id:
+        return query_one(
+            "SELECT * FROM games WHERE event_id = ? AND status = 'in_progress' "
+            "ORDER BY game_number DESC LIMIT 1",
+            (event_id,),
+        )
+    return None
+
+
+def get_match_state(match_id: int) -> dict:
+    """Live state of a match: roster with elimination flags and alive/total counts."""
+    match = query_one("SELECT * FROM games WHERE id = ?", (match_id,))
+    players = get_game_players(match_id) if match else []
+    alive = sum(1 for p in players if not p["eliminated"])
+    return {
+        "match": match,
+        "players": players,
+        "alive": alive,
+        "total": len(players),
+        "winner": next((p for p in players if p.get("placement") == 1), None),
+    }
+
+
+def get_match_team_state(match_id: int) -> dict:
+    """Team-level elimination summary for a match (teams alive / total)."""
+    teams = query(
+        "SELECT team_lead_id, COUNT(*) AS total, "
+        "COALESCE(SUM(eliminated), 0) AS eliminated_count "
+        "FROM game_team_members WHERE game_id = ? GROUP BY team_lead_id",
+        (match_id,),
+    )
+    alive_teams = sum(1 for t in teams if (t["eliminated_count"] or 0) < t["total"])
+    return {
+        "teams": teams,
+        "alive_teams": alive_teams,
+        "total_teams": len(teams),
+    }
+
+
+def eliminate_match_player(match_id: int, player_id: int) -> dict:
+    """Mark a player eliminated. Their match placement is set to the number of
+    alive players at the moment of elimination (the last player standing gets 1st).
+    Returns the remaining alive count and the winner when only one is left."""
+    gp = query_one(
+        "SELECT * FROM game_players WHERE game_id = ? AND player_id = ?",
+        (match_id, player_id),
+    )
+    if not gp:
+        return {"ok": False, "error": "Player is not in this match."}
+    if gp["eliminated"]:
+        return {"ok": False, "error": "Player is already eliminated."}
+    alive = query_one(
+        "SELECT COUNT(*) AS c FROM game_players WHERE game_id = ? AND eliminated = 0",
+        (match_id,),
+    )["c"]
+    execute(
+        "UPDATE game_players SET eliminated = 1, eliminated_at = CURRENT_TIMESTAMP, "
+        "placement = COALESCE(placement, ?) WHERE id = ?",
+        (alive, gp["id"]),
+    )
+    alive_left = alive - 1
+    result = {"ok": True, "placement": alive, "alive_left": alive_left}
+    if alive_left == 1:
+        winner = query_one(
+            "SELECT gp.*, COALESCE(p.game_username, p.username) AS username, p.discord_id "
+            "FROM game_players gp JOIN players p ON gp.player_id = p.id "
+            "WHERE gp.game_id = ? AND gp.eliminated = 0",
+            (match_id,),
+        )
+        if winner:
+            execute("UPDATE game_players SET placement = 1 WHERE id = ?", (winner["id"],))
+            result["winner"] = winner
+    return result
+
+
+def resolve_match_placements(match_id: int) -> dict | None:
+    """Finalize placements: the last player standing gets 1st. Returns the winner row."""
+    alive = query(
+        "SELECT gp.*, COALESCE(p.game_username, p.username) AS username, p.discord_id "
+        "FROM game_players gp JOIN players p ON gp.player_id = p.id "
+        "WHERE gp.game_id = ? AND gp.eliminated = 0",
+        (match_id,),
+    )
+    if len(alive) == 1:
+        execute("UPDATE game_players SET placement = 1 WHERE id = ?", (alive[0]["id"],))
+        return alive[0]
+    return None
+
+
+def end_match(match_id: int) -> dict:
+    """Mark a match completed; when exactly one player remains they are the winner.
+    Returns {"ok": True, "winner": row | None}."""
+    execute(
+        "UPDATE games SET status = 'completed', ended_at = CURRENT_TIMESTAMP "
+        "WHERE id = ? AND status != 'completed'",
+        (match_id,),
+    )
+    return {"ok": True, "winner": resolve_match_placements(match_id)}
+
+
+# ------------------------------------------------------------------ divisions
+
+
+def create_division(name: str, role_id: str, guild_id: str) -> dict:
+    """Create a division (idempotent by name). Returns the division row."""
+    existing = query_one("SELECT * FROM divisions WHERE name = ?", (name,))
+    if existing:
+        return existing
+    did = execute(
+        "INSERT INTO divisions (name, role_id, guild_id) VALUES (?, ?, ?)",
+        (name, role_id, guild_id),
+    )
+    return get_division(did)
+
+
+def get_division(division_id: int) -> dict | None:
+    return query_one("SELECT * FROM divisions WHERE id = ?", (division_id,))
+
+
+def get_divisions() -> list[dict]:
+    return query("SELECT * FROM divisions ORDER BY name")
+
+
+def delete_division(division_id: int) -> None:
+    execute("DELETE FROM division_members WHERE division_id = ?", (division_id,))
+    execute("DELETE FROM divisions WHERE id = ?", (division_id,))
+
+
+def add_division_member(
+    division_id: int, discord_id: str, qualified_from_event_id: int | None = None
+) -> dict:
+    execute(
+        "INSERT OR IGNORE INTO division_members (division_id, discord_id, qualified_from_event_id) "
+        "VALUES (?, ?, ?)",
+        (division_id, discord_id, qualified_from_event_id),
+    )
+    return query_one(
+        "SELECT * FROM division_members WHERE division_id = ? AND discord_id = ?",
+        (division_id, discord_id),
+    )
+
+
+def remove_division_member(division_id: int, discord_id: str) -> bool:
+    with get_db() as conn:
+        cur = conn.execute(
+            "DELETE FROM division_members WHERE division_id = ? AND discord_id = ?",
+            (division_id, discord_id),
+        )
+        return cur.rowcount > 0
+
+
+def get_division_members(division_id: int) -> list[dict]:
+    return query(
+        "SELECT dm.*, p.username FROM division_members dm "
+        "LEFT JOIN players p ON dm.discord_id = p.discord_id "
+        "WHERE dm.division_id = ? ORDER BY dm.created_at",
+        (division_id,),
+    )
+
+
+# ------------------------------------------------------------------ qualifiers
+
+
+def set_event_qualifier_requirements(event_id: int, requirements: dict) -> None:
+    execute(
+        "UPDATE events SET qualifier_requirements = ? WHERE id = ?",
+        (json.dumps(requirements or {}), event_id),
+    )
+
+
+def get_event_qualifier_requirements(event_id: int) -> dict:
+    ev = get_event(event_id)
+    if not ev:
+        return {}
+    try:
+        return json.loads(ev.get("qualifier_requirements") or "{}") or {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def evaluate_qualifier(event_id: int) -> dict:
+    """Evaluate a completed qualifier event against its requirements.
+    Returns {"qualified": [...], "requirements": {...}}."""
+    ev = get_event(event_id)
+    if not ev:
+        return {"qualified": [], "requirements": {}}
+    req = get_event_qualifier_requirements(event_id)
+    if not req:
+        return {"qualified": [], "requirements": {}}
+    top = int(req.get("top") or 0)
+    min_kills = int(req.get("min_kills") or 0)
+    min_wins = int(req.get("min_wins") or 0)
+
+    if (ev.get("team_size") or 1) >= 2:
+        board = get_team_leaderboard(event_id)
+    else:
+        board = get_leaderboard(event_id)
+
+    qualified = []
+    for i, row in enumerate(board, 1):
+        if top and i > top:
+            break
+        did = row.get("lead_id") or row.get("discord_id")
+        if not did:
+            continue
+        if min_kills and (row.get("total_kills") or 0) < min_kills:
+            continue
+        if min_wins and (row.get("wins") or 0) < min_wins:
+            continue
+        qualified.append({
+            "discord_id": did,
+            "username": row.get("username") or row.get("team_name", ""),
+            "placement": i,
+            "wins": row.get("wins") or 0,
+            "kills": row.get("total_kills") or 0,
+            "team_members": row.get("team_members"),
+        })
+    return {"qualified": qualified, "requirements": req}
+
+
+def grant_qualification(
+    event_id: int, discord_id: str, username: str, team_members: str | None = None
+) -> dict:
+    """Record a player as qualified; if the qualifier targets a division, also add
+    them to it. Returns {"ok": True, "division_id": int | None}."""
+    add_event_qualifier(event_id, discord_id, username, team_members)
+    req = get_event_qualifier_requirements(event_id)
+    division_id = req.get("target_division_id")
+    if division_id:
+        add_division_member(int(division_id), discord_id, qualified_from_event_id=event_id)
+    return {"ok": True, "division_id": division_id}
+
+
+# ------------------------------------------------------------------ brackets
+
+
+def _get_or_create_bracket_match(event_id: int, round_num: int, position: int) -> dict:
+    match = query_one(
+        "SELECT * FROM bracket_matches WHERE event_id = ? AND round = ? AND position = ?",
+        (event_id, round_num, position),
+    )
+    if match:
+        return match
+    mid = execute(
+        "INSERT INTO bracket_matches (event_id, round, position, status) "
+        "VALUES (?, ?, ?, 'ready')",
+        (event_id, round_num, position),
+    )
+    return query_one("SELECT * FROM bracket_matches WHERE id = ?", (mid,))
+
+
+def _bracket_round_count(event_id: int) -> int:
+    row = query_one(
+        "SELECT COALESCE(MAX(round), 1) AS r FROM bracket_matches WHERE event_id = ?",
+        (event_id,),
+    )
+    return row["r"] if row else 1
+
+
+def _resolve_bracket_byes(event_id: int) -> None:
+    """Auto-advance lone players through empty bracket matches (cascading byes)."""
+    changed = True
+    while changed:
+        changed = False
+        matches = query(
+            "SELECT * FROM bracket_matches WHERE event_id = ? ORDER BY round, position",
+            (event_id,),
+        )
+        by_round: dict[int, list[dict]] = {}
+        for m in matches:
+            by_round.setdefault(m["round"], []).append(m)
+        max_round = max(by_round) if by_round else 1
+        for r in range(1, max_round):
+            for m in by_round.get(r, []):
+                if m["status"] == "done" or m["winner_id"]:
+                    continue
+                p1, p2 = m["player1_id"], m["player2_id"]
+                if p1 and not p2:
+                    winner = p1
+                elif p2 and not p1:
+                    winner = p2
+                else:
+                    continue
+                execute(
+                    "UPDATE bracket_matches SET winner_id = ?, status = 'done' WHERE id = ?",
+                    (winner, m["id"]),
+                )
+                nxt = _get_or_create_bracket_match(
+                    event_id, r + 1, (m["position"] - 1) // 2 + 1
+                )
+                if nxt["player1_id"] is None:
+                    execute(
+                        "UPDATE bracket_matches SET player1_id = ? WHERE id = ?",
+                        (winner, nxt["id"]),
+                    )
+                elif nxt["player2_id"] is None:
+                    execute(
+                        "UPDATE bracket_matches SET player2_id = ? WHERE id = ?",
+                        (winner, nxt["id"]),
+                    )
+                changed = True
+
+
+def seed_bracket(event_id: int) -> dict:
+    """Seed a 1v1 single-elimination bracket for a bracket event, ordered by PR
+    (highest first). Returns {"ok": True, "rounds": int, "champion": id|None}."""
+    ev = get_event(event_id)
+    if not ev:
+        return {"ok": False, "error": "Event not found."}
+    if (ev.get("event_type") or "cup") != "bracket":
+        return {"ok": False, "error": "Event is not a bracket."}
+    if query_one("SELECT 1 FROM bracket_matches WHERE event_id = ? LIMIT 1", (event_id,)):
+        return {"ok": False, "error": "Bracket is already seeded."}
+
+    players = get_event_players(event_id)
+    players.sort(key=lambda p: (p.get("pr") or 0), reverse=True)
+    if not players:
+        return {"ok": False, "error": "No players to seed."}
+    if len(players) == 1:
+        return {"ok": True, "rounds": 1, "champion": players[0]["id"]}
+
+    matches = []
+    for i in range(0, len(players), 2):
+        p1 = players[i]
+        p2 = players[i + 1] if i + 1 < len(players) else None
+        mid = execute(
+            "INSERT INTO bracket_matches (event_id, round, position, player1_id, player2_id, status) "
+            "VALUES (?, 1, ?, ?, ?, 'ready')",
+            (event_id, i // 2 + 1, p1["id"], p2["id"] if p2 else None),
+        )
+        matches.append(mid)
+
+    round_num = 1
+    while len(matches) > 1:
+        round_num += 1
+        nxt = []
+        for pos in range(1, (len(matches) + 1) // 2 + 1):
+            mid = _get_or_create_bracket_match(event_id, round_num, pos)
+            nxt.append(mid)
+        matches = nxt
+
+    _resolve_bracket_byes(event_id)
+    return {"ok": True, "rounds": round_num, "champion": None}
+
+
+def get_bracket_matches(event_id: int) -> list[dict]:
+    return query(
+        "SELECT m.*, "
+        "COALESCE(p1.game_username, p1.username) AS player1_name, p1.discord_id AS player1_discord_id, "
+        "COALESCE(p2.game_username, p2.username) AS player2_name, p2.discord_id AS player2_discord_id, "
+        "COALESCE(pw.game_username, pw.username) AS winner_name, pw.discord_id AS winner_discord_id "
+        "FROM bracket_matches m "
+        "LEFT JOIN players p1 ON m.player1_id = p1.id "
+        "LEFT JOIN players p2 ON m.player2_id = p2.id "
+        "LEFT JOIN players pw ON m.winner_id = pw.id "
+        "WHERE m.event_id = ? ORDER BY m.round, m.position",
+        (event_id,),
+    )
+
+
+def advance_bracket_winner(match_id: int, winner_id: int) -> dict:
+    """Record a bracket match winner and advance them to the next round.
+    Returns {"ok": True, "finished": bool, "next_match": int|None} — finished when
+    the final match was won."""
+    match = query_one("SELECT * FROM bracket_matches WHERE id = ?", (match_id,))
+    if not match:
+        return {"ok": False, "error": "Match not found."}
+    if match["winner_id"]:
+        return {"ok": False, "error": "Match is already decided."}
+    if winner_id not in (match["player1_id"], match["player2_id"]):
+        return {"ok": False, "error": "Winner is not part of this match."}
+    execute(
+        "UPDATE bracket_matches SET winner_id = ?, status = 'done' WHERE id = ?",
+        (winner_id, match_id),
+    )
+    rounds_total = _bracket_round_count(match["event_id"])
+    if match["round"] >= rounds_total:
+        return {"ok": True, "finished": True, "next_match": None}
+    nxt = _get_or_create_bracket_match(
+        match["event_id"], match["round"] + 1, (match["position"] - 1) // 2 + 1
+    )
+    if nxt["player1_id"] is None:
+        execute("UPDATE bracket_matches SET player1_id = ? WHERE id = ?", (winner_id, nxt["id"]))
+    elif nxt["player2_id"] is None:
+        execute("UPDATE bracket_matches SET player2_id = ? WHERE id = ?", (winner_id, nxt["id"]))
+    return {"ok": True, "finished": False, "next_match": nxt["id"]}
+
+
+def get_bracket_placements(event_id: int) -> list[dict]:
+    """Final standings from the bracket tree: the final winner is 1st; losers of
+    round r (1-based, final = rounds_total) place within
+    (2**(rounds_total - r + 1) - 1, 2**(rounds_total - r + 1)]."""
+    rounds_total = _bracket_round_count(event_id)
+    matches = query(
+        "SELECT * FROM bracket_matches WHERE event_id = ? AND winner_id IS NOT NULL "
+        "ORDER BY round DESC, position",
+        (event_id,),
+    )
+    losers_by_round: dict[int, list[int]] = {}
+    for m in matches:
+        if m["winner_id"] == m["player1_id"]:
+            loser = m["player2_id"]
+        else:
+            loser = m["player1_id"]
+        if loser:
+            losers_by_round.setdefault(m["round"], []).append(loser)
+
+    standings = []
+    final = next((m for m in matches if m["round"] == rounds_total), None)
+    if final and final["winner_id"]:
+        standings.append({"player_id": final["winner_id"], "placement": 1})
+    for r in sorted(losers_by_round, reverse=True):
+        band_lo = 2 ** (rounds_total - r + 1) - 1
+        band_hi = 2 ** (rounds_total - r + 1)
+        for i, pid in enumerate(losers_by_round[r]):
+            placement = min(band_lo + 1 + i, band_hi)
+            standings.append({"player_id": pid, "placement": placement})
+    standings.sort(key=lambda s: s["placement"])
+    return standings
+
+
+# ------------------------------------------------------------------ duel asks
+
+
+DUEL_ASK_TTL_SECONDS = 900
+
+
+def create_duel_ask(asker_id: str, partner_id: str | None, target_ids: list[str]) -> int:
+    """Record a pending 1v1/2v2 ask. Returns the ask id."""
+    return execute(
+        "INSERT INTO duel_asks (asker_id, partner_id, target_ids, status, expires_at) "
+        "VALUES (?, ?, ?, 'pending', ?)",
+        (asker_id, partner_id, json.dumps(list(target_ids)),
+         int(time.time()) + DUEL_ASK_TTL_SECONDS),
+    )
+
+
+def get_duel_ask(ask_id: int) -> dict | None:
+    return query_one("SELECT * FROM duel_asks WHERE id = ?", (ask_id,))
+
+
+def get_pending_duel_asks() -> list[dict]:
+    """All non-expired asks (pending or accepted) — used to re-attach buttons."""
+    return query(
+        "SELECT * FROM duel_asks WHERE status IN ('pending', 'accepted') "
+        "ORDER BY id ASC"
+    )
+
+
+def set_duel_ask_status(ask_id: int, status: str) -> None:
+    execute("UPDATE duel_asks SET status = ? WHERE id = ?", (status, ask_id))
+
+
+def set_duel_ask_channels(
+    ask_id: int, text_channel_id: str, voice_channel_id: str, category_id: str
+) -> None:
+    execute(
+        "UPDATE duel_asks SET text_channel_id = ?, voice_channel_id = ?, category_id = ? "
+        "WHERE id = ?",
+        (text_channel_id, voice_channel_id, category_id, ask_id),
+    )
+
+
+def expire_stale_duel_asks() -> int:
+    """Mark pending asks past their TTL as expired. Returns how many were expired."""
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE duel_asks SET status = 'expired' "
+            "WHERE status = 'pending' AND expires_at <= ?",
+            (int(time.time()),),
+        )
+        return cur.rowcount
+
+
+def get_stale_duel_asks() -> list[dict]:
+    """Return pending asks past their TTL (for channel cleanup), expiring them."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM duel_asks WHERE status = 'pending' AND expires_at <= ?",
+            (int(time.time()),),
+        ).fetchall()
+        if rows:
+            conn.execute(
+                "UPDATE duel_asks SET status = 'expired' "
+                "WHERE status = 'pending' AND expires_at <= ?",
+                (int(time.time()),),
+            )
+        return list(rows)
+
+
+# ------------------------------------------------------------------ coins
+
+
+def remove_coins(discord_id: str, amount: int) -> int:
+    """Subtract coins (floor at 0). Returns the new balance."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT coins FROM invite_coins WHERE discord_id = ?", (discord_id,)
+        ).fetchone()
+        new_balance = max(0, (row["coins"] if row else 0) - int(amount))
+        conn.execute(
+            "INSERT INTO invite_coins (discord_id, coins) VALUES (?, ?) "
+            "ON CONFLICT(discord_id) DO UPDATE SET coins = ?, updated_at = CURRENT_TIMESTAMP",
+            (discord_id, new_balance, new_balance),
+        )
+        return new_balance
+
+
+def reset_coins(discord_id: str) -> int:
+    """Zero a player's coin balance. Returns the previous balance."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT coins FROM invite_coins WHERE discord_id = ?", (discord_id,)
+        ).fetchone()
+        old = row["coins"] if row else 0
+        conn.execute(
+            "INSERT INTO invite_coins (discord_id, coins) VALUES (?, 0) "
+            "ON CONFLICT(discord_id) DO UPDATE SET coins = 0, updated_at = CURRENT_TIMESTAMP",
+            (discord_id,),
+        )
+        return old
+
+
+def award_coins(discord_id: str, amount: int) -> int:
+    """Credit coins to a player (used by coins cups). Returns the new balance."""
+    return add_coins(discord_id, amount)
+
+
+# ============================ Phase 2: scoring & entry helpers ============================
+
+
+def event_awards_pr(ev: dict | None) -> bool:
+    """Whether an event awards PR (coins cups and explicitly PR-less events don't)."""
+    if not ev:
+        return False
+    if (ev.get("scoring_mode") or "normal") == "coins":
+        return False
+    return bool(ev.get("awards_pr", 1))
+
+
+def award_coins_for_placements(game_id: int, event_id: int) -> int:
+    """Pay out placement-scale values as invite coins (coins cups only).
+    Returns how many players were paid."""
+    ev = get_event(event_id)
+    if not ev or not ev.get("coins_enabled"):
+        return 0
+    try:
+        scale = json.loads(ev.get("placement_scale") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        scale = []
+    if not scale:
+        return 0
+    rows = query(
+        "SELECT player_id, placement FROM game_players "
+        "WHERE game_id = ? AND placement IS NOT NULL",
+        (game_id,),
+    )
+    paid = 0
+    for row in rows:
+        p = row["placement"]
+        if p and 1 <= p <= len(scale):
+            did_row = query_one(
+                "SELECT discord_id FROM players WHERE id = ?", (row["player_id"],)
+            )
+            if did_row:
+                add_coins(did_row["discord_id"], int(scale[p - 1]))
+                paid += 1
+    return paid
+
+
+def get_lobby_latest_session(lobby_id: int) -> dict | None:
+    return query_one(
+        "SELECT * FROM sessions WHERE lobby_id = ? ORDER BY session_number DESC LIMIT 1",
+        (lobby_id,),
+    )
+
+
+def get_lobby_leaderboard_full(lobby_id: int) -> list[dict]:
+    """Full lobby leaderboard with derived stats (alias used by dashboard)."""
+    return get_lobby_leaderboard(lobby_id)
+
+
+def finalize_bracket(event_id: int) -> dict:
+    """Turn bracket standings into a completed game record with placements,
+    apply placement points, pay out coins (coins cups), and mark the event
+    completed. Returns {"ok": True, "game_id", "standings"} or an error."""
+    ev = get_event(event_id)
+    if not ev:
+        return {"ok": False, "error": "Event not found."}
+    if (ev.get("event_type") or "cup") != "bracket":
+        return {"ok": False, "error": "Not a bracket event."}
+    standings = get_bracket_placements(event_id)
+    if not standings:
+        return {"ok": False, "error": "The bracket has no finished matches yet."}
+    if not any(s["placement"] == 1 for s in standings):
+        return {"ok": False, "error": "The bracket final is not decided yet."}
+
+    row = query_one(
+        "SELECT COALESCE(MAX(game_number), 0) AS n FROM games WHERE event_id = ?",
+        (event_id,),
+    )
+    gid = create_game_record(
+        event_id, (row["n"] if row else 0) + 1, ev.get("room_code") or "", "completed"
+    )
+    placed_ids = set()
+    for s in standings:
+        execute(
+            "INSERT OR IGNORE INTO game_players (game_id, player_id, placement) "
+            "VALUES (?, ?, ?)",
+            (gid, s["player_id"], s["placement"]),
+        )
+        placed_ids.add(s["player_id"])
+    for p in get_event_players(event_id):
+        if p["id"] not in placed_ids:
+            execute(
+                "INSERT OR IGNORE INTO game_players (game_id, player_id) VALUES (?, ?)",
+                (gid, p["id"]),
+            )
+    apply_placement_points(gid, event_id)
+    if ev.get("coins_enabled"):
+        award_coins_for_placements(gid, event_id)
+    execute("UPDATE events SET status = 'completed' WHERE id = ?", (event_id,))
+    return {"ok": True, "game_id": gid, "standings": standings}

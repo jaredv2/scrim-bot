@@ -202,11 +202,19 @@ class InviteCoinsCog(commands.Cog):
         inviter = member.guild.get_member(inviter_id)
         if inviter:
             try:
-                await inviter.send(
-                    f"🪙 **{member.display_name}** joined through your invite!"
-                    f"\nYour coin is **pending** — it's paid out once they've been here "
-                    f"{settings.invite_min_stay_hours}h (account {settings.invite_min_account_days}+ days old). "
+                stay_text = (
+                    f"Your coin is **pending** — it's paid out once they've been here "
+                    f"{settings.invite_min_stay_hours}h (account "
+                    f"{settings.invite_min_account_days}+ days old). "
                     f"If they leave early the reward is cancelled."
+                    if settings.invite_min_stay_hours > 0
+                    else (
+                        f"Your coin is **on its way** — it pays out once the invite is "
+                        f"approved (account {settings.invite_min_account_days}+ days old)."
+                    )
+                )
+                await inviter.send(
+                    f"🪙 **{member.display_name}** joined through your invite!\n{stay_text}"
                 )
             except (discord.Forbidden, discord.HTTPException):
                 pass

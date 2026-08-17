@@ -7,11 +7,22 @@ from config import settings
 from discord import app_commands
 from discord.ext import commands
 from embeds import base, error, success
-from templates_fmt import cup_announcement, dm_message, end_tournament, role_ping, to_unix_ts
+from templates_fmt import (
+    cup_announcement,
+    dm_message,
+    end_tournament,
+    role_ping,
+    team_size_label,
+    to_unix_ts,
+)
 
 from database import (
+    award_coins_for_placements,
+    create_event_record,
     create_game_record,
+    event_awards_pr,
     execute,
+    get_divisions,
     get_event,
     get_event_players,
     get_event_registrations,
@@ -20,9 +31,10 @@ from database import (
     get_leaderboard,
     get_team_leaderboard,
     query_one,
+    set_event_qualifier_requirements,
     update_player_pr,
 )
-from ranks import sync_rank_role
+from ranks import sync_crown_role, sync_rank_role
 
 
 class EventsCog(commands.Cog):
@@ -31,17 +43,26 @@ class EventsCog(commands.Cog):
 
     @commands.hybrid_command(
         name="create-event",
-        description="Create a new scrim/cup event with format, points, and team settings",
+        description="Create a cup/scrim/bracket/qualifier event with format, entry rules, and scoring",
     )
     @app_commands.describe(
         name="Event name",
         channel="Channel for announcement",
         signup_channel="Channel for player registrations",
-        team_size="Team size (1=solo, 2=duo, 3=trio)",
+        event_type="Event type",
+        entry_mode="Who can enter (open / PR cap / division)",
+        pr_cap="Max PR allowed when entry_mode=pr_limited",
+        division="Division name required when entry_mode=division",
+        scoring_mode="Scoring system (coins cups pay out placement scale as coins)",
+        awards_pr="Whether this event awards PR (coins cups never do)",
+        qualifier_top="Qualifier: how many top finishers qualify",
+        qualifier_target="Qualifier: event id that qualified players may join",
+        qualifier_division="Qualifier: division auto-granted to qualified players",
+        team_size="Team size (1=solo, 2=duo, 3=trio, 4=squad)",
         total_games="Number of games (0 = unlimited session)",
         max_players="Max players",
         region="Region (EU, NA, ASIA, etc.)",
-        event_format="Format (ZoneWars, BoxFights, etc.)",
+        event_format="Format (ZoneWars, BoxFights, BattleRoyale, etc.)",
         start_time="Start time (e.g. 3:00 PM EST)",
         point_kill="Points per elimination",
         point_win="Points for victory",
@@ -53,13 +74,39 @@ class EventsCog(commands.Cog):
         place_4plus="4th place+ prize/label (optional, shown in announcement)",
         pr_multiplier="PR multiplier override (0 = auto based on player count)",
         shoot_timer="Shoot timer in seconds (0 = none), shown in game DMs",
+        dispatch="Post a dispatch message (with room code) immediately after creation",
+        room_code="Room code used when dispatch is enabled",
     )
+    @app_commands.rename(event_type="type")
     @app_commands.choices(
+        event_type=[
+            app_commands.Choice(name="Cup", value="cup"),
+            app_commands.Choice(name="Scrim", value="scrim"),
+            app_commands.Choice(name="Bracket", value="bracket"),
+            app_commands.Choice(name="Qualifier", value="qualifier"),
+        ],
+        entry_mode=[
+            app_commands.Choice(name="Open", value="open"),
+            app_commands.Choice(name="PR limited", value="pr_limited"),
+            app_commands.Choice(name="Division only", value="division"),
+        ],
+        scoring_mode=[
+            app_commands.Choice(name="Normal", value="normal"),
+            app_commands.Choice(name="Placement only", value="placement_only"),
+            app_commands.Choice(name="Coins", value="coins"),
+        ],
         team_size=[
             app_commands.Choice(name="Solo (1)", value=1),
             app_commands.Choice(name="Duo (2)", value=2),
             app_commands.Choice(name="Trio (3)", value=3),
-        ]
+            app_commands.Choice(name="Squad (4)", value=4),
+        ],
+        event_format=[
+            app_commands.Choice(name="Zone Wars", value="ZoneWars"),
+            app_commands.Choice(name="Box Fights", value="BoxFights"),
+            app_commands.Choice(name="Battle Royale", value="BattleRoyale"),
+            app_commands.Choice(name="Realistic", value="Realistic"),
+        ],
     )
     async def create_event(
         self,
@@ -67,6 +114,15 @@ class EventsCog(commands.Cog):
         name: str,
         channel: discord.TextChannel,
         signup_channel: discord.TextChannel,
+        event_type: str = "cup",
+        entry_mode: str = "open",
+        pr_cap: int = 0,
+        division: str = "",
+        scoring_mode: str = "normal",
+        awards_pr: bool = True,
+        qualifier_top: int = 0,
+        qualifier_target: int = 0,
+        qualifier_division: str = "",
         region: str = "EU",
         event_format: str = "ZoneWars",
         start_time: str = "TBD",
@@ -83,26 +139,140 @@ class EventsCog(commands.Cog):
         place_4plus: str = "",
         pr_multiplier: float = 0.0,
         shoot_timer: int = 0,
+        dispatch: bool = False,
+        room_code: str = "",
     ) -> None:
         if not await self._check_admin(ctx):
             return
         if ctx.interaction:
             await ctx.interaction.response.defer(ephemeral=True)
 
-        ps_json = json.dumps([int(x.strip()) for x in placement_scale.split(",") if x.strip()])
+        event_type = (event_type or "cup").strip().lower()
+        if event_type not in ("cup", "scrim", "bracket", "qualifier"):
+            await ctx.send(embed=error("Invalid event type."))
+            return
+        entry_mode = (entry_mode or "open").strip().lower()
+        if entry_mode not in ("open", "pr_limited", "division"):
+            await ctx.send(embed=error("Invalid entry mode."))
+            return
+        scoring_mode = (scoring_mode or "normal").strip().lower()
+        if scoring_mode not in ("normal", "placement_only", "coins"):
+            await ctx.send(embed=error("Invalid scoring mode."))
+            return
+        if event_type == "bracket" and team_size != 1:
+            await ctx.send(embed=error("Brackets are 1v1 — team_size must be Solo (1)."))
+            return
 
-        event_id = execute(
-            "INSERT INTO events "
-            "(name, status, channel_id, signup_channel_id, team_size, total_games, "
-            "max_players, region, event_format, point_kill, point_win, placement_scale, "
-            "qualification_enabled, place_1, place_2, place_3, place_4plus, "
-            "pr_multiplier, shoot_timer, scheduled_at) "
-            "VALUES (?, 'setup', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (name, str(channel.id), str(signup_channel.id), team_size, total_games, max_players, region, event_format, point_kill, point_win, ps_json,
-             1 if qualification else 0, place_1.strip() or None, place_2.strip() or None, place_3.strip() or None, place_4plus.strip() or None,
-             pr_multiplier if pr_multiplier > 0 else None, shoot_timer if shoot_timer > 0 else 0,
-             to_unix_ts(start_time) or None),
+        required_division_id = None
+        if entry_mode == "division":
+            if not division.strip():
+                await ctx.send(
+                    embed=error("Pick a division name for division-gated entry.")
+                )
+                return
+            match = next(
+                (
+                    d
+                    for d in get_divisions()
+                    if d["name"].lower() == division.strip().lower()
+                ),
+                None,
+            )
+            if not match:
+                await ctx.send(
+                    embed=error(
+                        f"Division **{division.strip()}** not found. "
+                        "Create it first with `/create-division`."
+                    )
+                )
+                return
+            required_division_id = match["id"]
+
+        qualifier_division_id = None
+        if qualifier_division.strip():
+            match = next(
+                (
+                    d
+                    for d in get_divisions()
+                    if d["name"].lower() == qualifier_division.strip().lower()
+                ),
+                None,
+            )
+            if not match:
+                await ctx.send(
+                    embed=error(
+                        f"Division **{qualifier_division.strip()}** not found. "
+                        "Create it first with `/create-division`."
+                    )
+                )
+                return
+            qualifier_division_id = match["id"]
+
+        if event_type == "qualifier":
+            if qualifier_top <= 0:
+                await ctx.send(
+                    embed=error("Qualifiers need `qualifier_top` (how many qualify).")
+                )
+                return
+            if qualifier_target <= 0 and qualifier_division_id is None:
+                await ctx.send(
+                    embed=error(
+                        "Qualifiers need a `qualifier_target` event id or a "
+                        "`qualifier_division` to grant."
+                    )
+                )
+                return
+
+        coins_cup = scoring_mode == "coins"
+        ps_json = json.dumps(
+            [int(x.strip()) for x in placement_scale.split(",") if x.strip()]
         )
+
+        event_id = create_event_record(
+            name=name,
+            status="setup",
+            channel_id=str(channel.id),
+            signup_channel_id=str(signup_channel.id),
+            team_size=team_size,
+            total_games=total_games,
+            max_players=max_players,
+            region=region,
+            event_format=event_format,
+            point_kill=point_kill,
+            point_win=point_win,
+            placement_scale=ps_json,
+            qualification_enabled=1 if qualification else 0,
+            place_1=place_1.strip() or None,
+            place_2=place_2.strip() or None,
+            place_3=place_3.strip() or None,
+            place_4plus=place_4plus.strip() or None,
+            pr_multiplier=pr_multiplier if pr_multiplier > 0 else None,
+            shoot_timer=shoot_timer if shoot_timer > 0 else 0,
+            scheduled_at=to_unix_ts(start_time) or None,
+            event_type=event_type,
+            entry_mode=entry_mode,
+            pr_cap=pr_cap if pr_cap > 0 else None,
+            required_division_id=required_division_id,
+            scoring_mode=scoring_mode,
+            awards_pr=1 if (awards_pr and not coins_cup) else 0,
+            coins_enabled=1 if coins_cup else 0,
+        )
+
+        if event_type == "qualifier":
+            set_event_qualifier_requirements(
+                event_id,
+                {
+                    "top": qualifier_top,
+                    "target_event_id": qualifier_target if qualifier_target > 0 else None,
+                    "target_division_id": qualifier_division_id,
+                },
+            )
+
+        if room_code.strip():
+            execute(
+                "UPDATE events SET room_code = ? WHERE id = ?",
+                (room_code.strip(), event_id),
+            )
 
         await signup_channel.set_permissions(
             ctx.guild.default_role,
@@ -110,31 +280,79 @@ class EventsCog(commands.Cog):
             reason="Event created, registration closed",
         )
 
-        team_label = {1: "Solo", 2: "Duo", 3: "Trio"}.get(team_size, "Solo")
-        text = cup_announcement(
-            name=name,
-            format_label=team_label,
-            region=region,
-            start_time=start_time,
-            point_kill=point_kill,
-            point_win=point_win,
-            ping_role=role_ping(settings.discord_tournament_role_id),
-            place_1=place_1.strip() or None,
-            place_2=place_2.strip() or None,
-            place_3=place_3.strip() or None,
-            place_4plus=place_4plus.strip() or None,
-        )
-        await channel.send(text)
+        if event_type != "scrim":
+            team_label = team_size_label(team_size)
+            text = cup_announcement(
+                name=name,
+                format_label=team_label,
+                region=region,
+                start_time=start_time,
+                point_kill=point_kill,
+                point_win=point_win,
+                ping_role=role_ping(settings.discord_tournament_role_id),
+                place_1=place_1.strip() or None,
+                place_2=place_2.strip() or None,
+                place_3=place_3.strip() or None,
+                place_4plus=place_4plus.strip() or None,
+            )
+            await channel.send(text)
+
+        entry_note = {
+            "open": "Open entry",
+            "pr_limited": f"PR cap: {pr_cap}",
+            "division": f"Division: {division.strip()}",
+        }[entry_mode]
+        scoring_note = {
+            "normal": "Normal scoring",
+            "placement_only": "Placement-only scoring",
+            "coins": "Coins cup (placement scale pays out coins)",
+        }[scoring_mode]
+        qualifier_note = ""
+        if event_type == "qualifier":
+            qualifier_note = (
+                f"\nQualifier: top **{qualifier_top}** qualify"
+                + (f" → Event {qualifier_target}" if qualifier_target > 0 else "")
+                + (
+                    f" → division **{qualifier_division.strip()}**"
+                    if qualifier_division_id
+                    else ""
+                )
+            )
 
         await ctx.send(
             embed=success(
                 f"Event **{name}** created (ID: {event_id}).\n"
-                f"Announcement in {channel.mention}\n"
+                f"Type: **{event_type.title()}** | {entry_note} | {scoring_note}"
+                + ("" if awards_pr or coins_cup else "\nNo PR awarded")
+                + qualifier_note
+                + f"\nAnnouncement in {channel.mention}\n"
                 f"Registrations in {signup_channel.mention}"
                 + (f"\nPR multiplier: **{pr_multiplier}x**" if pr_multiplier > 0 else "")
                 + (f"\nShoot timer: **{shoot_timer}s**" if shoot_timer > 0 else "")
+                + (
+                    f"\nDispatch posted in {channel.mention}"
+                    if dispatch
+                    else ""
+                )
             ),
         )
+
+        if dispatch:
+            dispatch_msg = (
+                f"**{team_size_label(team_size)} Scrim**\n"
+                f"Format: {event_format}\n"
+                f"Region: {region}\n"
+                f"Code: **{room_code.strip() or 'TBD'}**\n"
+                + (
+                    role_ping(settings.discord_scrim_role_id)
+                    if event_type == "scrim"
+                    else role_ping(settings.discord_tournament_role_id)
+                )
+            )
+            try:
+                await channel.send(dispatch_msg)
+            except Exception:
+                pass
 
     @commands.hybrid_command(
         name="start-event",
@@ -196,6 +414,7 @@ class EventsCog(commands.Cog):
                 role = await ctx.guild.create_role(
                     name=f"Team {i + 1}",
                     color=discord.Color(color),
+                    hoist=True,
                     reason=f"Event {ev['name']} - Team {i + 1}",
                 )
                 team_roles.append(role.id)
@@ -308,7 +527,7 @@ class EventsCog(commands.Cog):
             )
 
         regs = get_event_registrations(event_id)
-        team_label = {1: "Solo", 2: "Duo", 3: "Trio"}.get(ev["team_size"], "Solo")
+        team_label = team_size_label(ev["team_size"])
 
         sent = 0
         failed = 0
@@ -420,13 +639,16 @@ class EventsCog(commands.Cog):
                     (placement, pts, game["id"], p["id"]),
                 )
 
+        award_coins_for_placements(game["id"], event_id)
+
         game_players = get_game_players(game["id"])
 
         remaining = (ev["total_games"] or 0) > 0 and game_number >= ev["total_games"]
 
-        for p in game_players:
-            update_player_pr(p["discord_id"], event_id=event_id)
-        await self._sync_ranks(ctx, game_players)
+        if event_awards_pr(ev):
+            for p in game_players:
+                update_player_pr(p["discord_id"], event_id=event_id)
+            await self._sync_ranks(ctx, game_players)
 
         team_size = ev.get("team_size", 1)
         medals = ["🥇", "🥈", "🥉"]
@@ -462,9 +684,12 @@ class EventsCog(commands.Cog):
                 for i, p in enumerate(game_players[:10]):
                     medal = medals[i] if i < 3 else f"{i+1}."
                     dq = " 🚫" if p["is_disqualified"] else ""
-                    name = p.get("username") or p.get("team_name", "Unknown")
+                    if p.get("discord_id"):
+                        name = f"<@{p['discord_id']}>"
+                    else:
+                        name = p.get("username") or p.get("team_name", "Unknown")
                     lines.append(
-                        f"{medal} **{name}** — "
+                        f"{medal} {name} — "
                         f"{p['points']} pts, {p['kills']} kills{dq}"
                     )
             else:
@@ -523,11 +748,16 @@ class EventsCog(commands.Cog):
         else:
             board = get_leaderboard(event_id)
 
-        for row in board:
-            did = row.get("discord_id") or row.get("lead_id")
-            if did:
-                update_player_pr(did, event_id=event_id)
-        await self._sync_ranks(ctx, board)
+        if event_awards_pr(ev):
+            for row in board:
+                did = row.get("discord_id") or row.get("lead_id")
+                if did:
+                    update_player_pr(did, event_id=event_id)
+            await self._sync_ranks(ctx, board)
+
+        if board:
+            winner_did = board[0].get("discord_id") or board[0].get("lead_id")
+            await sync_crown_role(ctx.guild, winner_did)
 
         channel = ctx.guild.get_channel(
             int(ev["dispatch_channel_id"] or 0)
@@ -572,6 +802,8 @@ class EventsCog(commands.Cog):
                     medal = medals[i] if i < 3 else f"{i+1}."
                     if team_size >= 2:
                         name = self._get_team_mention(ctx.guild, row)
+                    elif row.get("discord_id"):
+                        name = f"<@{row['discord_id']}>"
                     else:
                         name = row.get("username", "Unknown")
                     lb_lines.append(
@@ -644,7 +876,7 @@ class EventsCog(commands.Cog):
         if ctx.interaction:
             await ctx.interaction.response.defer(ephemeral=True)
 
-        team_label = {1: "Solo", 2: "Duo", 3: "Trio"}.get(ev["team_size"], "Solo")
+        team_label = team_size_label(ev["team_size"])
         msg = dm_message(
             event_name=ev["name"],
             format_label=team_label,
@@ -672,76 +904,6 @@ class EventsCog(commands.Cog):
         embed.add_field(name="Failed", value=str(failed), inline=True)
         embed.add_field(name="Total", value=str(len(regs)), inline=True)
         await ctx.send(embed=embed)
-
-    @commands.hybrid_command(
-        name="create-scrim",
-        description="Create a scrim: auto-generates SCRIM-XXXX ID, sets up channels and PR points",
-    )
-    @app_commands.describe(
-        channel="Channel for scrim announcements",
-        signup_channel="Channel for player registrations",
-        team_size="Team size (1=solo, 2=duo, 3=trio)",
-        match_count="Number of matches",
-        base_pr_kill="Points per elimination",
-        base_pr_win="Points for win",
-        region="Region (EU, NA, ASIA, etc.)",
-        event_format="Format (ZoneWars, BoxFights, etc.)",
-        placement_scale="Placement points (comma-separated, e.g. 10,8,6,4,2,1)",
-        pr_multiplier="PR multiplier override (0 = auto based on player count)",
-        shoot_timer="Shoot timer in seconds (0 = none), shown in game DMs",
-    )
-    @app_commands.choices(
-        team_size=[
-            app_commands.Choice(name="Solo (1)", value=1),
-            app_commands.Choice(name="Duo (2)", value=2),
-            app_commands.Choice(name="Trio (3)", value=3),
-        ]
-    )
-    async def create_scrim(
-        self,
-        ctx: commands.Context,
-        channel: discord.TextChannel,
-        signup_channel: discord.TextChannel,
-        region: str = "EU",
-        event_format: str = "ZoneWars",
-        team_size: int = 1,
-        match_count: int = 3,
-        base_pr_kill: int = 5,
-        base_pr_win: int = 25,
-        placement_scale: str = "10,8,6,4,2,1",
-        pr_multiplier: float = 0.0,
-        shoot_timer: int = 0,
-    ) -> None:
-        if not await self._check_admin(ctx):
-            return
-        if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=True)
-
-        ps_json = json.dumps([int(x.strip()) for x in placement_scale.split(",") if x.strip()])
-
-        import random
-        scrim_id = f"SCRIM-{random.randint(1000, 9999)}"
-        name = f"Scrim #{scrim_id}"
-
-        event_id = execute(
-            "INSERT INTO events "
-            "(name, status, channel_id, signup_channel_id, team_size, total_games, "
-            "max_players, region, event_format, point_kill, point_win, placement_scale, "
-            "pr_multiplier, shoot_timer) "
-            "VALUES (?, 'setup', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (name, str(channel.id), str(signup_channel.id), team_size, match_count, 100, region, event_format, base_pr_kill, base_pr_win, ps_json,
-             pr_multiplier if pr_multiplier > 0 else None, shoot_timer if shoot_timer > 0 else 0),
-        )
-
-        await signup_channel.set_permissions(
-            ctx.guild.default_role,
-            send_messages=False,
-            reason="Scrim created, registration closed",
-        )
-
-        await ctx.send(
-            embed=success(f"Scrim **{name}** created (ID: {event_id}).\nScrim code: `{scrim_id}`"),
-        )
 
     @commands.hybrid_command(
         name="start-scrim",
@@ -772,7 +934,7 @@ class EventsCog(commands.Cog):
             (room_code, event_id),
         )
 
-        team_label = {1: "Solo", 2: "Duo", 3: "Trio"}.get(ev["team_size"], "Solo")
+        team_label = team_size_label(ev["team_size"])
         msg = (
             f"**{team_label} Scrim**\n"
             f"Format: {ev.get('event_format', 'ZoneWars')}\n"
@@ -839,11 +1001,12 @@ class EventsCog(commands.Cog):
         else:
             board = get_leaderboard(event_id)
 
-        for row in board:
-            did = row.get("discord_id") or row.get("lead_id")
-            if did:
-                update_player_pr(did, event_id=event_id)
-        await self._sync_ranks(ctx, board)
+        if event_awards_pr(ev):
+            for row in board:
+                did = row.get("discord_id") or row.get("lead_id")
+                if did:
+                    update_player_pr(did, event_id=event_id)
+            await self._sync_ranks(ctx, board)
 
         channel = ctx.guild.get_channel(
             int(ev["dispatch_channel_id"] or ev["channel_id"] or 0)
@@ -854,7 +1017,10 @@ class EventsCog(commands.Cog):
             if board:
                 for i, row in enumerate(board[:10]):
                     medal = medals[i] if i < 3 else f"{i+1}."
-                    name = row.get("username") or row.get("team_name", "Unknown")
+                    if row.get("discord_id"):
+                        name = f"<@{row['discord_id']}>"
+                    else:
+                        name = row.get("username") or row.get("team_name", "Unknown")
                     lb_lines.append(
                         f"{medal} **{name}** — "
                         f"{row['total_points']} pts ({row['total_kills']} kills)"
@@ -886,9 +1052,9 @@ class EventsCog(commands.Cog):
         name="create-session",
         description="Create a pending session for an event (sessions hold multiple matches)",
     )
-    @app_commands.describe(event_id="Event ID")
+    @app_commands.describe(event_id="Event ID", lobby_id="Lobby ID (optional, for lobby-scoped sessions)")
     async def create_session_cmd(
-        self, ctx: commands.Context, event_id: int
+        self, ctx: commands.Context, event_id: int, lobby_id: int | None = None
     ) -> None:
         if not await self._check_admin(ctx):
             return
@@ -902,10 +1068,19 @@ class EventsCog(commands.Cog):
             await ctx.send(embed=error("Event not found."))
             return
 
-        session = create_session(event_id)
+        if lobby_id is not None:
+            from database import get_lobby
+
+            lobby = get_lobby(lobby_id)
+            if not lobby:
+                await ctx.send(embed=error("Lobby not found."))
+                return
+
+        session = create_session(event_id, lobby_id)
+        scope = f" for lobby **{lobby['name']}**" if lobby_id is not None else ""
         await ctx.send(
             embed=success(
-                f"Session **#{session['session_number']}** created for **{ev['name']}**. "
+                f"Session **#{session['session_number']}** created{scope} for **{ev['name']}**. "
                 "Ready to start with `;start-session`."
             )
         )
@@ -916,12 +1091,14 @@ class EventsCog(commands.Cog):
     )
     @app_commands.describe(
         event_id="Event ID",
+        lobby_id="Lobby ID (optional, for lobby-scoped sessions)",
         room_code="Room code to dispatch (optional, uses event room code if empty)",
     )
     async def start_session_cmd(
         self,
         ctx: commands.Context,
         event_id: int,
+        lobby_id: int | None = None,
         room_code: str = "",
     ) -> None:
         if not await self._check_admin(ctx):
@@ -938,20 +1115,25 @@ class EventsCog(commands.Cog):
             "INSERT INTO command_queue (command, params) VALUES ('start_session', ?)",
             (
                 json.dumps(
-                    {"event_id": event_id, "room_code": room_code.strip()}
+                    {
+                        "event_id": event_id,
+                        "lobby_id": lobby_id,
+                        "room_code": room_code.strip(),
+                    }
                 ),
             ),
         )
+        scope = f" (lobby {lobby_id})" if lobby_id is not None else ""
         await ctx.send(
-            embed=success(f"Session start queued for **{ev['name']}**.")
+            embed=success(f"Session start queued for **{ev['name']}**{scope}.")
         )
 
     @commands.hybrid_command(
         name="end-session",
         description="End a session: complete its last match, post session leaderboard",
     )
-    @app_commands.describe(event_id="Event ID")
-    async def end_session_cmd(self, ctx: commands.Context, event_id: int) -> None:
+    @app_commands.describe(event_id="Event ID", lobby_id="Lobby ID (optional, for lobby-scoped sessions)")
+    async def end_session_cmd(self, ctx: commands.Context, event_id: int, lobby_id: int | None = None) -> None:
         if not await self._check_admin(ctx):
             return
         if ctx.interaction:
@@ -964,10 +1146,11 @@ class EventsCog(commands.Cog):
 
         execute(
             "INSERT INTO command_queue (command, params) VALUES ('end_session', ?)",
-            (json.dumps({"event_id": event_id}),),
+            (json.dumps({"event_id": event_id, "lobby_id": lobby_id}),),
         )
+        scope = f" (lobby {lobby_id})" if lobby_id is not None else ""
         await ctx.send(
-            embed=success(f"Session end queued for **{ev['name']}**.")
+            embed=success(f"Session end queued for **{ev['name']}**{scope}.")
         )
 
     def _get_team_mention(self, guild: discord.Guild, row: dict) -> str:

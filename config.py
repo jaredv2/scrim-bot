@@ -32,9 +32,12 @@ class Settings(BaseSettings):
     discord_schedule_channel_id: str = ""
     discord_shop_pic_role_id: str = ""
     discord_media_lounge_channel_id: str = ""
+    discord_lfg_channel_id: str = ""
+    discord_crown_role_id: str = ""
 
     # Invite-coin anti-abuse thresholds (all overridable via .env)
-    invite_min_stay_hours: int = 3
+    # invite_min_stay_hours=0 pays invite rewards out instantly (no stay wait)
+    invite_min_stay_hours: int = 0
     invite_min_account_days: int = 7
     invite_reward_coins: int = 1
     invite_loyalty_bonus: int = 2

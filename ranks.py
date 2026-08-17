@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import discord
 
+from config import digits_only, settings
 from database import get_rank_for_pr, query_one
 
 RANK_COLORS = {
@@ -111,3 +112,35 @@ async def sync_legend_role(guild: discord.Guild) -> discord.Member | None:
             pass
 
     return legend_member
+
+
+async def sync_crown_role(
+    guild: discord.Guild, winner_discord_id: str | None
+) -> discord.Member | None:
+    """Give the configured crown role to the event winner and remove it from
+    everyone else. No-op when DISCORD_CROWN_ROLE_ID is not set."""
+    role_id = digits_only(settings.discord_crown_role_id)
+    if not role_id:
+        return None
+    role = guild.get_role(int(role_id))
+    if not role:
+        return None
+
+    winner_member = (
+        guild.get_member(int(winner_discord_id)) if winner_discord_id else None
+    )
+    for member in guild.members:
+        if member.bot:
+            continue
+        if role in member.roles and member != winner_member:
+            try:
+                await member.remove_roles(role, reason="Event winner crown update")
+            except discord.HTTPException:
+                pass
+
+    if winner_member and role not in winner_member.roles:
+        try:
+            await winner_member.add_roles(role, reason="Event winner")
+        except discord.HTTPException:
+            pass
+    return winner_member

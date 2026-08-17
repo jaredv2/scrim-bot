@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from embeds import base, error, success
-from templates_fmt import to_unix_ts
+from templates_fmt import team_size_label, to_unix_ts
 
 from database import (
     clear_event_schedule,
@@ -68,7 +68,7 @@ def build_schedule_embed(ev: dict) -> discord.Embed:
     if ts:
         emb.add_field(name="Start Time", value=f"<t:{ts}:F>")
         emb.add_field(name="Relative", value=f"<t:{ts}:R>")
-    emb.add_field(name="Format", value={1: "Solo", 2: "Duo", 3: "Trio"}.get(ev.get("team_size", 1), "Solo"))
+    emb.add_field(name="Format", value=team_size_label(ev.get("team_size", 1)))
     emb.add_field(name="Region", value=ev.get("region", "EU"))
     emb.add_field(name="Status", value=ev.get("status", "setup"))
     emb.set_footer(
@@ -122,7 +122,7 @@ class ScheduleCog(commands.Cog):
             await ctx.interaction.response.defer(ephemeral=True)
 
         if event_id is None:
-            channel, missing = _target_channel(ctx)
+            channel, missing = self._target_channel(ctx)
             if not channel:
                 await ctx.send(embed=error(missing))
                 return
@@ -161,7 +161,7 @@ class ScheduleCog(commands.Cog):
             )
             return
 
-        channel, missing = _target_channel(ctx)
+        channel, missing = self._target_channel(ctx)
         if not channel:
             await ctx.send(embed=error(missing))
             return

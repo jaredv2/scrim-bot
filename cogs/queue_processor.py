@@ -12,6 +12,7 @@ from templates_fmt import (
     end_tournament,
     role_ping,
     signup_announcement,
+    team_size_label,
 )
 
 logger = logging.getLogger("scrim-bot")
@@ -145,7 +146,7 @@ class CommandQueueCog(commands.Cog):
         code = params.get("code", "")
         game_number = params.get("game_number")
         session_number = params.get("session_number")
-        team_label = {1: "Solo", 2: "Duo", 3: "Trio"}.get(ev["team_size"], "Solo")
+        team_label = team_size_label(ev["team_size"])
         if session_number:
             game_label = f" — Session {session_number} · Match {game_number}" if game_number else f" — Session {session_number}"
         else:
@@ -184,7 +185,7 @@ class CommandQueueCog(commands.Cog):
         if not channel:
             return
 
-        team_label = {1: "Solo", 2: "Duo", 3: "Trio"}.get(ev["team_size"], "Solo")
+        team_label = team_size_label(ev["team_size"])
         text = cup_announcement(
             name=ev["name"],
             format_label=team_label,
@@ -207,7 +208,7 @@ class CommandQueueCog(commands.Cog):
         if not channel:
             return
 
-        team_label = {1: "Solo", 2: "Duo", 3: "Trio"}.get(ev["team_size"], "Solo")
+        team_label = team_size_label(ev["team_size"])
         text = signup_announcement(
             name=ev["name"],
             format_label=team_label,
@@ -269,7 +270,7 @@ class CommandQueueCog(commands.Cog):
             return
 
         code = params.get("code", "")
-        team_label = {1: "Solo", 2: "Duo", 3: "Trio"}.get(ev["team_size"], "Solo")
+        team_label = team_size_label(ev["team_size"])
         msg = dm_message(
             event_name=ev["name"],
             format_label=team_label,
@@ -336,7 +337,7 @@ class CommandQueueCog(commands.Cog):
             )
 
     async def _end_game(self, guild: discord.Guild, params: dict) -> None:
-        from database import apply_placement_points, execute, query_one
+        from database import apply_placement_points, award_coins_for_placements, execute, query_one
 
         ev = get_event(params["event_id"])
         if not ev:
@@ -366,6 +367,7 @@ class CommandQueueCog(commands.Cog):
                 )
 
         apply_placement_points(game["id"], ev["id"])
+        award_coins_for_placements(game["id"], ev["id"])
 
         await self._post_game_results(guild, ev, game)
 
@@ -479,20 +481,30 @@ class CommandQueueCog(commands.Cog):
             create_session,
             execute,
             get_event_active_session,
-            get_event_players,
             get_latest_session,
+            get_lobby_active_session,
+            get_lobby_latest_session,
             query_one,
+            register_match_players,
         )
 
         ev = get_event(params["event_id"])
         if not ev:
             return
 
-        session = get_event_active_session(ev["id"])
-        if not session:
-            session = get_latest_session(ev["id"])
-            if not session or session["status"] != "pending":
-                session = create_session(ev["id"])
+        lobby_id = params.get("lobby_id")
+        if lobby_id:
+            session = get_lobby_active_session(lobby_id)
+            if not session:
+                session = get_lobby_latest_session(lobby_id)
+                if not session or session["status"] != "pending":
+                    session = create_session(ev["id"], lobby_id)
+        else:
+            session = get_event_active_session(ev["id"])
+            if not session:
+                session = get_latest_session(ev["id"])
+                if not session or session["status"] != "pending":
+                    session = create_session(ev["id"])
 
         sid = session["id"]
         room_code = params.get("room_code") or ev.get("room_code") or ""
@@ -518,12 +530,7 @@ class CommandQueueCog(commands.Cog):
         game_id = create_game_record(
             ev["id"], game_number, room_code, session_id=sid
         )
-        players = get_event_players(ev["id"])
-        for p in players:
-            execute(
-                "INSERT OR IGNORE INTO game_players (game_id, player_id) VALUES (?, ?)",
-                (game_id, p["id"]),
-            )
+        register_match_players(game_id, ev["id"], lobby_id)
 
         execute(
             "UPDATE sessions SET current_match = ? WHERE id = ?",
@@ -547,14 +554,24 @@ class CommandQueueCog(commands.Cog):
         )
 
     async def _end_session(self, guild: discord.Guild, params: dict) -> None:
+        from database import get_lobby_active_session, get_lobby_latest_session
+
         ev = get_event(params["event_id"])
         if not ev:
             return
-        session = get_event_active_session(ev["id"])
-        if not session:
-            session = get_latest_session(ev["id"])
-            if not session or session["status"] == "completed":
-                return
+        lobby_id = params.get("lobby_id")
+        if lobby_id:
+            session = get_lobby_active_session(lobby_id)
+            if not session:
+                session = get_lobby_latest_session(lobby_id)
+                if not session or session["status"] == "completed":
+                    return
+        else:
+            session = get_event_active_session(ev["id"])
+            if not session:
+                session = get_latest_session(ev["id"])
+                if not session or session["status"] == "completed":
+                    return
 
         sid = session["id"]
         cur = query_one(
@@ -604,7 +621,10 @@ class CommandQueueCog(commands.Cog):
         lines = []
         for i, row in enumerate(board):
             medal = medals[i] if i < 3 else f"{i+1}."
-            name = row.get("username") or row.get("team_name", "Unknown")
+            if row.get("discord_id"):
+                name = f"<@{row['discord_id']}>"
+            else:
+                name = row.get("username") or row.get("team_name", "Unknown")
             dq = " 🚫" if row.get("is_dq") else ""
             lines.append(
                 f"{medal} **{name}** — {row['total_points']} pts ({row['total_kills']} kills) "
@@ -641,6 +661,10 @@ class CommandQueueCog(commands.Cog):
             "ended_at = CURRENT_TIMESTAMP WHERE id = ?",
             (game["id"],),
         )
+
+        from database import award_coins_for_placements
+
+        award_coins_for_placements(game["id"], ev["id"])
 
         await self._post_game_results(guild, ev, game)
 
@@ -685,8 +709,8 @@ class CommandQueueCog(commands.Cog):
         from database import (
             create_game_record,
             execute,
-            get_event_players,
             query_one,
+            register_match_players,
         )
 
         sid = session["id"]
@@ -703,12 +727,7 @@ class CommandQueueCog(commands.Cog):
         game_id = create_game_record(
             ev["id"], game_number, room_code, session_id=sid
         )
-        players = get_event_players(ev["id"])
-        for p in players:
-            execute(
-                "INSERT OR IGNORE INTO game_players (game_id, player_id) VALUES (?, ?)",
-                (game_id, p["id"]),
-            )
+        register_match_players(game_id, ev["id"], session.get("lobby_id"))
 
         execute(
             "UPDATE sessions SET current_match = ? WHERE id = ?",
@@ -784,8 +803,12 @@ class CommandQueueCog(commands.Cog):
                 for i, p in enumerate(players):
                     medal = medals[i] if i < 3 else f"{i+1}."
                     dq = " 🚫" if p["is_disqualified"] else ""
+                    if p.get("discord_id"):
+                        name = f"<@{p['discord_id']}>"
+                    else:
+                        name = p.get("username") or "Unknown"
                     lines.append(
-                        f"{medal} **{p['username']}** — "
+                        f"{medal} **{name}** — "
                         f"{p['points']} pts, {p['kills']} kills{dq}"
                     )
             else:
@@ -834,7 +857,10 @@ class CommandQueueCog(commands.Cog):
         lines = []
         for i, row in enumerate(board[:15]):
             medal = medals[i] if i < 3 else f"{i+1}."
-            name = row.get("username") or row.get("team_name", "Unknown")
+            if row.get("discord_id"):
+                name = f"<@{row['discord_id']}>"
+            else:
+                name = row.get("username") or row.get("team_name", "Unknown")
             placements = row.get("placements") or []
             pl_str = ", ".join(f"#{p}" for p in placements) if placements else "—"
             if row.get("is_dq"):
@@ -900,7 +926,10 @@ class CommandQueueCog(commands.Cog):
                                     mentions.append(member.mention if member else f"<@{mid}>")
                         name = " x ".join(mentions) if mentions else row.get("team_name", "Unknown")
                     else:
-                        name = row.get("username", "Unknown")
+                        if row.get("discord_id"):
+                            name = f"<@{row['discord_id']}>"
+                        else:
+                            name = row.get("username", "Unknown")
                     placements = row.get("placements") or []
                     pl_str = ", ".join(f"#{p}" for p in placements) if placements else "—"
                     lines.append(

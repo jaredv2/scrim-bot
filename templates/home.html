@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scrim Hub</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <h1>Scrim Hub</h1>
+            <div>
+                <a href="/home">Home</a> &nbsp;|&nbsp;
+                <a href="/leaderboard">Leaderboard</a> &nbsp;|&nbsp;
+                <a href="/compare">Compare</a> &nbsp;|&nbsp;
+                <a href="/search">Search</a> &nbsp;|&nbsp;
+                <a href="/login">Staff Login</a>
+            </div>
+        </div>
+    </header>
+    <div class="container">
+        <div class="card">
+            <h2>Upcoming & Recent Events</h2>
+            {% if events %}
+            <table>
+                <thead>
+                    <tr><th>ID</th><th>Name</th><th>Type</th><th>Status</th><th>Team</th><th>Region</th><th>Players</th></tr>
+                </thead>
+                <tbody>
+                    {% for ev in events %}
+                    <tr>
+                        <td>{{ ev.id }}</td>
+                        <td>{{ ev.name }}</td>
+                        <td>{{ ev.event_type or 'cup' }}</td>
+                        <td><span class="status-badge status-{{ ev.status }}">{{ ev.status }}</span></td>
+                        <td>{{ ['Solo','Duo','Trio','Squad'][ev.team_size - 1] if ev.team_size and ev.team_size <= 4 else ev.team_size }}</td>
+                        <td>{{ ev.region }}</td>
+                        <td>{{ ev.players }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty">No events yet.</div>
+            {% endif %}
+        </div>
+
+        <div class="card">
+            <h2>Top Players — Season {{ season if season else '—' }}</h2>
+            {% if top %}
+            <table>
+                <thead>
+                    <tr><th>#</th><th>Player</th><th>PR</th><th>Wins</th><th>Kills</th><th>Games</th></tr>
+                </thead>
+                <tbody>
+                    {% for p in top %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td><a href="/account/{{ p.discord_id }}">{{ p.username }}</a></td>
+                        <td>{{ p.pr or 0 }}</td>
+                        <td>{{ p.total_wins or 0 }}</td>
+                        <td>{{ p.total_kills or 0 }}</td>
+                        <td>{{ p.total_games or 0 }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty">No players yet.</div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

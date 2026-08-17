@@ -58,6 +58,14 @@ def dynamic_time(time_str: str | None, style: str = "F") -> str:
     return f"<t:{unix}:{style}>"
 
 
+TEAM_SIZE_LABELS = {1: "Solo", 2: "Duo", 3: "Trio", 4: "Squad"}
+
+
+def team_size_label(team_size: int) -> str:
+    """Human-readable label for a team size (1=solo, 2=duo, 3=trio, 4=squad)."""
+    return TEAM_SIZE_LABELS.get(int(team_size), f"{team_size}-player")
+
+
 def role_ping(role_id: str) -> str:
     """Role mention for announcements; falls back to @everyone when not configured."""
     return f"<@&{role_id}>" if role_id else "@everyone"

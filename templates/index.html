@@ -12,6 +12,7 @@
             <h1>Scrim Dashboard</h1>
             <div>
                 <a href="/">Home</a> &nbsp;|&nbsp;
+                <a href="/home">Public Home</a> &nbsp;|&nbsp;
                 <a href="/events">Events</a> &nbsp;|&nbsp;
                 <a href="/players">Players</a> &nbsp;|&nbsp;
                 <a href="/leaderboard">Leaderboard</a> &nbsp;|&nbsp;
@@ -53,6 +54,73 @@
         <div id="tab-events" class="tab-content">
             <div class="card">
                 <h2>Events</h2>
+                <details style="margin-bottom:16px">
+                    <summary style="cursor:pointer;font-weight:600">Create Event</summary>
+                    <form method="POST" action="/event/create" style="margin-top:12px">
+                        <div class="form-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                            <div><label>Name *</label><input type="text" name="name" required value="Night Cup"></div>
+                            <div><label>Type</label>
+                                <select name="event_type">
+                                    <option value="cup">Cup</option>
+                                    <option value="scrim">Scrim</option>
+                                    <option value="bracket">Bracket</option>
+                                    <option value="qualifier">Qualifier</option>
+                                </select>
+                            </div>
+                            <div><label>Entry mode</label>
+                                <select name="entry_mode">
+                                    <option value="open">Open</option>
+                                    <option value="pr_limited">PR limited</option>
+                                    <option value="division">Division only</option>
+                                </select>
+                            </div>
+                            <div><label>PR cap (entry_mode=pr_limited)</label><input type="number" name="pr_cap" value="0" min="0"></div>
+                            <div><label>Division (entry_mode=division)</label><input type="text" name="division" placeholder="e.g. Silver"></div>
+                            <div><label>Scoring</label>
+                                <select name="scoring_mode">
+                                    <option value="normal">Normal</option>
+                                    <option value="placement_only">Placement only</option>
+                                    <option value="coins">Coins</option>
+                                </select>
+                            </div>
+                            <div><label>Awards PR</label>
+                                <select name="awards_pr">
+                                    <option value="1">Yes</option>
+                                    <option value="0">No</option>
+                                </select>
+                            </div>
+                            <div><label>Team size</label>
+                                <select name="team_size">
+                                    <option value="1">Solo (1)</option>
+                                    <option value="2">Duo (2)</option>
+                                    <option value="3">Trio (3)</option>
+                                    <option value="4">Squad (4)</option>
+                                </select>
+                            </div>
+                            <div><label>Channel ID</label><input type="text" name="channel_id" placeholder="announcement channel"></div>
+                            <div><label>Signup channel ID</label><input type="text" name="signup_channel_id"></div>
+                            <div><label>Updates channel ID</label><input type="text" name="updates_channel_id"></div>
+                            <div><label>Dispatch channel ID</label><input type="text" name="dispatch_channel_id"></div>
+                            <div><label>Region</label><input type="text" name="region" value="EU"></div>
+                            <div><label>Format</label>
+                                <select name="event_format">
+                                    <option value="ZoneWars">Zone Wars</option>
+                                    <option value="BoxFights">Box Fights</option>
+                                    <option value="BattleRoyale">Battle Royale</option>
+                                    <option value="Realistic">Realistic</option>
+                                </select>
+                            </div>
+                            <div><label>Total games</label><input type="number" name="total_games" value="0" min="0"></div>
+                            <div><label>Max players</label><input type="number" name="max_players" value="100" min="1"></div>
+                            <div><label>Points / kill</label><input type="number" name="point_kill" value="1"></div>
+                            <div><label>Points / win</label><input type="number" name="point_win" value="5"></div>
+                            <div style="grid-column:1/-1"><label>Placement scale (JSON array)</label><input type="text" name="placement_scale" value="[10,8,6,4,2,1]"></div>
+                        </div>
+                        <div style="margin-top:12px">
+                            <button type="submit" class="btn btn-primary">Create Event</button>
+                        </div>
+                    </form>
+                </details>
                 <div id="events-list">
                     {% if events %}
                     <table>
@@ -65,7 +133,7 @@
                                 <td>{{ ev.id }}</td>
                                 <td>{{ ev.name }}</td>
                                 <td><span class="status-badge status-{{ ev.status }}">{{ ev.status }}</span></td>
-                                <td>{{ ['Solo','Duo','Trio'][ev.team_size - 1] }}</td>
+                                <td>{{ ['Solo','Duo','Trio','Squad'][ev.team_size - 1] if ev.team_size and ev.team_size <= 4 else ev.team_size }}</td>
                                 <td><a href="/event/{{ ev.id }}" class="btn btn-primary btn-sm">View</a></td>
                             </tr>
                             {% endfor %}

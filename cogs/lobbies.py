@@ -6,10 +6,12 @@ from discord.ext import commands
 from embeds import base, error, success
 
 from database import (
+    auto_split_lobbies,
     execute,
     get_event,
     get_event_lobbies,
     get_lobby,
+    get_lobby_leaderboard,
     get_lobby_players,
     query_one,
 )
@@ -236,6 +238,91 @@ class LobbiesCog(commands.Cog):
         await ctx.send(
             embed=success(f"Lobby **{lobby['name']}** closed."),
         )
+
+    @commands.hybrid_command(
+        name="split-lobbies",
+        description="Auto-split an event's registrations into lobbies (teams stay together)",
+    )
+    @app_commands.describe(event_id="Event ID", force="Re-split even if lobbies already exist")
+    async def split_lobbies(
+        self, ctx: commands.Context, event_id: int, force: bool = False
+    ) -> None:
+        if not await self._check_admin(ctx):
+            return
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+
+        ev = get_event(event_id)
+        if not ev:
+            await ctx.send(embed=error("Event not found."))
+            return
+
+        lobbies = auto_split_lobbies(event_id, force=force)
+        if not lobbies:
+            existing = get_event_lobbies(event_id)
+            if existing:
+                await ctx.send(
+                    embed=base(
+                        f"🏟️ {ev['name']} — {len(existing)} lobby(s) already exist"
+                    )
+                )
+            else:
+                await ctx.send(
+                    embed=success(
+                        f"No split needed for **{ev['name']}** — "
+                        "everyone fits in one lobby. Use `/create-lobby` or "
+                        "`/join-lobby` to organize manually."
+                    )
+                )
+            return
+
+        embed = base(f"🏟️ {ev['name']} — Split into {len(lobbies)} Lobbies", 0x2ECC71)
+        lines = []
+        for lob in lobbies:
+            players = get_lobby_players(lob["id"])
+            names = ", ".join(p["username"] for p in players)
+            lines.append(f"**{lob['name']}** (ID: {lob['id']}) — {len(players)} players\n{names}")
+        embed.description = "\n\n".join(lines)
+        embed.set_footer(text="Use /start-session with the lobby ID for lobby-scoped matches")
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(
+        name="lobby-leaderboard",
+        description="Show a lobby's leaderboard across all of its matches",
+    )
+    @app_commands.describe(lobby_id="Lobby ID")
+    async def lobby_leaderboard(
+        self, ctx: commands.Context, lobby_id: int
+    ) -> None:
+        lobby = get_lobby(lobby_id)
+        if not lobby:
+            await ctx.send(embed=error("Lobby not found."))
+            return
+
+        board = get_lobby_leaderboard(lobby_id)
+        if not board:
+            await ctx.send(
+                embed=base(f"🏟️ {lobby['name']} — No scores yet"),
+            )
+            return
+
+        medals = ["🥇", "🥈", "🥉"]
+        lines = []
+        for i, row in enumerate(board[:10]):
+            medal = medals[i] if i < 3 else f"{i+1}."
+            dq = " 🚫" if row.get("is_dq") else ""
+            name = row.get("username") or row.get("team_name", "Unknown")
+            lines.append(
+                f"{medal} **{name}** — {row['total_points']} pts "
+                f"({row['total_kills']} kills) | {row.get('wins', 0)}W"
+                f" | avg {row.get('avg_points', 0)} pts | "
+                f"{row.get('placement_points', 0)} pp{dq}"
+            )
+
+        embed = base(f"🏟️ {lobby['name']} — Leaderboard", 0x3498DB)
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"{len(board)} player(s) | Lobby ID: {lobby_id}")
+        await ctx.send(embed=embed)
 
     async def _check_admin(self, ctx: commands.Context) -> bool:
         if not ctx.guild:

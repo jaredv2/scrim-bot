@@ -19,10 +19,12 @@ from database import (
     add_event_qualifier,
     apply_placement_points,
     ban_player,
+    create_event_record,
     create_session,
     execute,
     get_bans,
     get_ban_by_id,
+    get_divisions,
     get_event,
     get_event_active_session,
     get_event_games,
@@ -331,6 +333,24 @@ async def index(request: Request, user: dict = Depends(get_current_user)):
     )
 
 
+@app.get("/home", response_class=HTMLResponse)
+async def home(request: Request):
+    """Public landing page — no login required."""
+    events = query(
+        "SELECT id, name, status, team_size, event_type, region, "
+        "(SELECT COUNT(*) FROM registrations r WHERE r.event_id = e.id AND r.status = 'confirmed') AS players "
+        "FROM events e ORDER BY created_at DESC LIMIT 25"
+    )
+    from database import get_players_leaderboard
+
+    top = get_players_leaderboard()[:10]
+    return templates.TemplateResponse(
+        request,
+        "home.html",
+        {"events": events, "top": top, "season": get_season()},
+    )
+
+
 @app.get("/players", response_class=HTMLResponse)
 async def players_page(request: Request, user: dict = Depends(get_current_user)):
     players = get_players_leaderboard()
@@ -636,29 +656,63 @@ async def game_detail(
 @app.post("/event/create")
 async def create_event(request: Request, user: dict = Depends(get_current_user)):
     form = await request.form()
-    name = form.get("name", "Untitled Event")
-    team_size = int(form.get("team_size", 1))
-    total_games = int(form.get("total_games", 0) or 0)
-    max_players = int(form.get("max_players", 100))
-    channel_id = form.get("channel_id", "")
-    signup_channel_id = form.get("signup_channel_id", "")
-    updates_channel_id = form.get("updates_channel_id", "")
-    dispatch_channel_id = form.get("dispatch_channel_id", "")
-    region = form.get("region", "EU")
-    event_format = form.get("event_format", "ZoneWars")
-    point_kill = int(form.get("point_kill", 1))
-    point_win = int(form.get("point_win", 5))
-    placement_scale = form.get("placement_scale", "[10,8,6,4,2,1]")
 
-    event_id = execute(
-        "INSERT INTO events "
-        "(name, status, channel_id, signup_channel_id, updates_channel_id, "
-        "dispatch_channel_id, team_size, total_games, max_players, "
-        "region, event_format, point_kill, point_win, placement_scale) "
-        "VALUES (?, 'setup', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (name, channel_id, signup_channel_id, updates_channel_id,
-         dispatch_channel_id, team_size, total_games, max_players,
-         region, event_format, point_kill, point_win, placement_scale),
+    def _int_field(name: str, default: int = 0) -> int:
+        try:
+            return int(form.get(name) or default)
+        except (TypeError, ValueError):
+            return default
+
+    def _str_field(name: str, default: str = "") -> str:
+        return str(form.get(name) or default).strip()
+
+    name = _str_field("name", "Untitled Event")
+    event_type = _str_field("event_type", "cup").lower()
+    entry_mode = _str_field("entry_mode", "open").lower()
+    scoring_mode = _str_field("scoring_mode", "normal").lower()
+    if event_type not in ("cup", "scrim", "bracket", "qualifier"):
+        event_type = "cup"
+    if entry_mode not in ("open", "pr_limited", "division"):
+        entry_mode = "open"
+    if scoring_mode not in ("normal", "placement_only", "coins"):
+        scoring_mode = "normal"
+    coins_cup = scoring_mode == "coins"
+
+    required_division_id = None
+    division_name = _str_field("division")
+    if entry_mode == "division" and division_name:
+        match = next(
+            (
+                d
+                for d in get_divisions()
+                if d["name"].lower() == division_name.lower()
+            ),
+            None,
+        )
+        required_division_id = match["id"] if match else None
+
+    event_id = create_event_record(
+        name=name,
+        status="setup",
+        channel_id=_str_field("channel_id"),
+        signup_channel_id=_str_field("signup_channel_id"),
+        updates_channel_id=_str_field("updates_channel_id"),
+        dispatch_channel_id=_str_field("dispatch_channel_id"),
+        team_size=_int_field("team_size", 1),
+        total_games=_int_field("total_games"),
+        max_players=_int_field("max_players", 100),
+        region=_str_field("region", "EU"),
+        event_format=_str_field("event_format", "ZoneWars"),
+        point_kill=_int_field("point_kill", 1),
+        point_win=_int_field("point_win", 5),
+        placement_scale=_str_field("placement_scale", "[10,8,6,4,2,1]"),
+        event_type=event_type,
+        entry_mode=entry_mode,
+        pr_cap=_int_field("pr_cap") or None,
+        required_division_id=required_division_id,
+        scoring_mode=scoring_mode,
+        awards_pr=0 if coins_cup else (1 if form.get("awards_pr") == "1" else 0),
+        coins_enabled=1 if coins_cup else 0,
     )
     if _is_ajax(request):
         return JSONResponse({"ok": True, "event_id": event_id})

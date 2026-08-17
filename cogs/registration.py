@@ -9,6 +9,7 @@ from discord.ext import commands
 from embeds import base, error, success
 
 from database import (
+    check_event_entry,
     count_event_players,
     execute,
     get_event,
@@ -319,6 +320,12 @@ class RegistrationCog(commands.Cog):
             await ctx.send(embed=error("Mention the players you want in the team."))
             return
 
+        for _, uid in members:
+            entry = check_event_entry(event_id, str(uid))
+            if not entry["ok"]:
+                await ctx.send(embed=error(f"<@{uid}>: {entry['reason']}"))
+                return
+
         result = register_team(ev, members, skin or "Default")
         if not result["ok"]:
             reason = {
@@ -331,6 +338,7 @@ class RegistrationCog(commands.Cog):
                 "FULL": "**The event is full!** This team can't be added.",
                 "ALREADY_REGISTERED": "Already registered: " + ", ".join(result.get("overlap", [])) + ".",
                 "SKIN_REQUIRED": "A team skin is required.",
+                "ENTRY_BLOCKED": result.get("reason") or "Entry requirements not met.",
             }.get(result["code"], "Couldn't add that team.")
             await ctx.send(embed=error(reason))
             return
@@ -364,6 +372,11 @@ class RegistrationCog(commands.Cog):
             return
         if is_player_banned(str(player.id)):
             await ctx.send(embed=error("That player is banned from registering."))
+            return
+
+        entry = check_event_entry(event_id, str(player.id))
+        if not entry["ok"]:
+            await ctx.send(embed=error(entry["reason"]))
             return
 
         reg = query_one(

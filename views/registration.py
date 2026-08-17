@@ -7,6 +7,7 @@ from discord import ui
 from discord.ext import commands
 
 from database import (
+    check_event_entry,
     count_event_players,
     execute,
     get_event,
@@ -84,6 +85,11 @@ def register_team(ev: dict, members: list[tuple[str, str]], skin: str) -> dict:
     for did in team_ids:
         if is_player_banned(did):
             return {"ok": False, "code": "BANNED"}
+
+    for did, _ in members:
+        entry = check_event_entry(ev["id"], did)
+        if not entry["ok"]:
+            return {"ok": False, "code": "ENTRY_BLOCKED", "reason": entry["reason"]}
 
     max_players = ev.get("max_players") or 0
     if max_players > 0 and count_event_players(ev["id"]) + len(team_ids) > max_players:
@@ -237,6 +243,13 @@ class RegisterView(ui.View):
         discord_id = str(interaction.user.id)
         username = interaction.user.display_name
 
+        entry = check_event_entry(ev["id"], discord_id)
+        if not entry["ok"]:
+            await interaction.response.send_message(
+                f"🚫 {entry['reason']}", ephemeral=True
+            )
+            return
+
         existing = query_one(
             "SELECT * FROM registrations WHERE event_id = ? AND discord_id = ?",
             (ev["id"], discord_id),
@@ -335,10 +348,10 @@ class RegisterView(ui.View):
             await skin_modal.wait()
             skin = skin_modal.skin_result or "Default"
 
-        team_label = {1: "Solo", 2: "Duo", 3: "Trio"}.get(self.team_size, "Squad")
+        fmt_label = team_label(self.team_size)
         need = self.team_size - 1
         prompt = await channel.send(
-            f"📝 {interaction.user.mention} ({ign}) — **{ev['name']}** ({team_label})\n"
+            f"📝 {interaction.user.mention} ({ign}) — **{ev['name']}** ({fmt_label})\n"
             f"Skin: {skin}\n"
             f"Reply with {need} mention{'s' if need > 1 else ''}: "
             f"{'@teammate1 @teammate2' if need > 1 else '@teammate'}"
@@ -442,6 +455,16 @@ class RegistrationHandler(commands.Cog):
             )
             execute("DELETE FROM pending_registrations WHERE id = ?", (pending["id"],))
             return
+
+        for m in [message.author] + members:
+            entry = check_event_entry(ev["id"], str(m.id))
+            if not entry["ok"]:
+                await message.add_reaction("❌")
+                await message.channel.send(
+                    f"🚫 {m.mention}: {entry['reason']}", delete_after=15
+                )
+                execute("DELETE FROM pending_registrations WHERE id = ?", (pending["id"],))
+                return
 
         max_players = ev.get("max_players") or 0
         if max_players > 0 and count_event_players(ev["id"]) + team_size > max_players:
@@ -614,6 +637,8 @@ class RegistrationHandler(commands.Cog):
                 f"`{team_signup_format(ev['team_size'])}`."
             ),
         }.get(result["code"], "❌ Couldn't register that team.")
+        if result["code"] == "ENTRY_BLOCKED":
+            reason = "❌ " + (result.get("reason") or "Entry requirements not met.")
         await message.channel.send(reason)
         return True
 

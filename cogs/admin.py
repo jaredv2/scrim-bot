@@ -769,6 +769,14 @@ class AdminCog(commands.Cog):
         if not ev:
             await interaction.response.send_message(embed=error("Event not found."), ephemeral=True)
             return
+        from database import check_event_entry
+
+        entry = check_event_entry(event_id, str(player.id))
+        if not entry["ok"]:
+            await interaction.response.send_message(
+                embed=error(entry["reason"]), ephemeral=True
+            )
+            return
         add_player_to_event(event_id, str(player.id), player.display_name)
         log_bot_action(event_id, "admin_add_player", f"Added {player.name} to event", str(interaction.user.id))
         await interaction.response.send_message(
@@ -1028,6 +1036,209 @@ class AdminCog(commands.Cog):
         )
         log_bot_action(target_event, "move_qualified", f"Moved {result['moved']} from event {source_event}", str(interaction.user.id))
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @commands.hybrid_command(
+        name="removeteam",
+        description="Remove a whole team (leader + members) from an event",
+    )
+    @app_commands.describe(event_id="Event ID", leader="The team leader")
+    async def removeteam(
+        self,
+        ctx: commands.Context,
+        event_id: int,
+        leader: discord.Member,
+    ) -> None:
+        if not await self._check_admin(ctx):
+            return
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+
+        from database import remove_team_from_event
+
+        result = remove_team_from_event(event_id, str(leader.id))
+        if not result["ok"]:
+            await ctx.send(embed=error("No registration found for that team leader."))
+            return
+        log_bot_action(event_id, "remove_team", f"Leader {leader.id}, {result['removed_members']} members", str(ctx.author.id))
+        await ctx.send(
+            embed=success(
+                f"Removed team led by {leader.mention} "
+                f"({result['removed_members']} player(s)) from event **{event_id}**."
+            ),
+        )
+
+    @commands.hybrid_command(
+        name="undq",
+        description="Undo a disqualification for a player in a specific game",
+    )
+    @app_commands.describe(
+        event_id="Event ID",
+        game_number="Game number",
+        player="Player to un-DQ",
+    )
+    async def undq(
+        self,
+        ctx: commands.Context,
+        event_id: int,
+        game_number: int,
+        player: discord.Member,
+    ) -> None:
+        if not await self._check_admin(ctx):
+            return
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+
+        game = query_one(
+            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            (event_id, game_number),
+        )
+        if not game:
+            await ctx.send(embed=error("Game not found."))
+            return
+
+        p = query_one("SELECT id FROM players WHERE discord_id = ?", (str(player.id),))
+        if not p:
+            await ctx.send(embed=error("Player not registered."))
+            return
+
+        gp = query_one(
+            "SELECT 1 FROM game_players WHERE game_id = ? AND player_id = ?",
+            (game["id"], p["id"]),
+        )
+        if not gp:
+            await ctx.send(embed=error("Player has no record in this game."))
+            return
+
+        execute(
+            "UPDATE game_players SET is_disqualified = 0 "
+            "WHERE game_id = ? AND player_id = ?",
+            (game["id"], p["id"]),
+        )
+
+        log_bot_action(event_id, "undq", f"Game {game_number}, player {player.id}", str(ctx.author.id))
+        await ctx.send(
+            embed=success(f"Removed DQ for {player.mention} in Game {game_number}."),
+        )
+
+    @commands.hybrid_command(
+        name="reset-score",
+        description="Delete all games/scores for an event and reopen registration",
+    )
+    @app_commands.describe(event_id="Event ID", confirm="Type yes to confirm")
+    async def reset_score(
+        self,
+        ctx: commands.Context,
+        event_id: int,
+        confirm: str = "",
+    ) -> None:
+        if not await self._check_admin(ctx):
+            return
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+
+        if confirm.strip().lower() != "yes":
+            await ctx.send(
+                embed=error(
+                    "This deletes every game and score for the event. "
+                    "Run with `confirm: yes` to proceed."
+                )
+            )
+            return
+
+        from database import reset_event_scores
+
+        ev = get_event(event_id)
+        if not ev:
+            await ctx.send(embed=error("Event not found."))
+            return
+
+        deleted = reset_event_scores(event_id)
+        log_bot_action(event_id, "reset_score", f"Deleted {deleted} games", str(ctx.author.id))
+        await ctx.send(
+            embed=success(
+                f"Reset **{ev['name']}**: {deleted} game(s) deleted, "
+                "registration reopened."
+            ),
+        )
+
+    @commands.hybrid_command(
+        name="add-coins",
+        description="Credit coins to a player",
+    )
+    @app_commands.describe(player="Player", amount="Amount of coins")
+    async def add_coins(
+        self,
+        ctx: commands.Context,
+        player: discord.Member,
+        amount: int,
+    ) -> None:
+        if not await self._check_admin(ctx):
+            return
+        if amount <= 0:
+            await ctx.send(embed=error("Amount must be positive."))
+            return
+
+        from database import award_coins, get_coins
+
+        balance = award_coins(str(player.id), amount)
+        log_bot_action(None, "add_coins", f"{player.id} +{amount}", str(ctx.author.id))
+        await ctx.send(
+            embed=success(
+                f"Added **{amount}** coins to {player.mention} "
+                f"(new balance: **{balance}**)."
+            ),
+        )
+
+    @commands.hybrid_command(
+        name="remove-coins",
+        description="Take coins from a player (floors at 0)",
+    )
+    @app_commands.describe(player="Player", amount="Amount of coins")
+    async def remove_coins(
+        self,
+        ctx: commands.Context,
+        player: discord.Member,
+        amount: int,
+    ) -> None:
+        if not await self._check_admin(ctx):
+            return
+        if amount <= 0:
+            await ctx.send(embed=error("Amount must be positive."))
+            return
+
+        from database import get_coins, remove_coins
+
+        balance = remove_coins(str(player.id), amount)
+        log_bot_action(None, "remove_coins", f"{player.id} -{amount}", str(ctx.author.id))
+        await ctx.send(
+            embed=success(
+                f"Removed **{amount}** coins from {player.mention} "
+                f"(new balance: **{balance}**)."
+            ),
+        )
+
+    @commands.hybrid_command(
+        name="reset-coins",
+        description="Zero a player's coin balance",
+    )
+    @app_commands.describe(player="Player")
+    async def reset_coins(
+        self,
+        ctx: commands.Context,
+        player: discord.Member,
+    ) -> None:
+        if not await self._check_admin(ctx):
+            return
+
+        from database import reset_coins
+
+        old = reset_coins(str(player.id))
+        log_bot_action(None, "reset_coins", f"{player.id} (was {old})", str(ctx.author.id))
+        await ctx.send(
+            embed=success(
+                f"Reset {player.mention}'s coins (previous balance: **{old}**)."
+            ),
+        )
 
     async def _apply_rank(self, interaction: discord.Interaction, player: discord.Member, pr: int) -> str:
         try:
