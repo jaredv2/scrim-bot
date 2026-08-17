@@ -286,7 +286,7 @@ class RegistrationCog(commands.Cog):
 
     @commands.hybrid_command(
         name="add-team",
-        description="ADMIN: create a team registration for an event (mention the full team, matching the event's team size)",
+        description="ADMIN: register a team for an event (first mention = leader)",
     )
     @app_commands.describe(
         event_id="Event ID",

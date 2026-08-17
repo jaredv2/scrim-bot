@@ -92,7 +92,7 @@ class InviteCoinsCog(commands.Cog):
 
     # ------------------------------------------------------------------ roles
 
-    def _get_or_create_role(self, guild: discord.Guild, name: str, colour: discord.Colour) -> discord.Role | None:
+    async def _get_or_create_role(self, guild: discord.Guild, name: str, colour: discord.Colour) -> discord.Role | None:
         role_id_cfg = {
             PIC_PERMS_ROLE_NAME: settings.discord_shop_pic_role_id,
         }.get(name)
@@ -104,7 +104,7 @@ class InviteCoinsCog(commands.Cog):
         if existing:
             return existing
         try:
-            return guild.create_role(name=name, colour=colour)
+            return await guild.create_role(name=name, colour=colour)
         except discord.Forbidden:
             log.warning("Missing Manage Roles — cannot create %s", name)
             return None
@@ -130,7 +130,7 @@ class InviteCoinsCog(commands.Cog):
     async def _sync_lounge_permissions(self, guild: discord.Guild) -> None:
         """text-only @everyone, images allowed only for Pic Perms holders."""
         lounge = await self._ensure_media_lounge(guild)
-        role = self._pic_perms_role(guild)
+        role = await self._pic_perms_role(guild)
         if not lounge or not role:
             return
         try:
@@ -144,8 +144,8 @@ class InviteCoinsCog(commands.Cog):
         except discord.Forbidden:
             log.warning("Missing Manage Channels — cannot lock %s", MEDIA_LOUNGE_NAME)
 
-    def _pic_perms_role(self, guild: discord.Guild) -> discord.Role | None:
-        return self._get_or_create_role(guild, PIC_PERMS_ROLE_NAME, discord.Colour.teal())
+    async def _pic_perms_role(self, guild: discord.Guild) -> discord.Role | None:
+        return await self._get_or_create_role(guild, PIC_PERMS_ROLE_NAME, discord.Colour.teal())
 
     # ------------------------------------------------------------- invite math
 
@@ -471,7 +471,7 @@ class InviteCoinsCog(commands.Cog):
             await ctx.send(embed=error("This command only works in a server."))
             return
         price, seconds = PIC_PERM_DURATIONS[duration]
-        role = self._pic_perms_role(ctx.guild)
+        role = await self._pic_perms_role(ctx.guild)
         if role is None:
             await ctx.send(embed=error("The Pic Perms role isn't set up — check bot permissions."))
             return
