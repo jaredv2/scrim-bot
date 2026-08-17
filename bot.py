@@ -244,22 +244,8 @@ class ScrimBot(commands.Bot):
             else:
                 cmds = await self.tree.sync()
             logger.info("commands_synced", extra={"count": len(cmds)})
-        except discord.errors.Forbidden:
-            logger.error(
-                "Failed to sync commands (Forbidden). Causes: (1) the bot invite "
-                "is missing the 'applications.commands' scope, or (2) DISCORD_GUILD_ID "
-                "(%s) points to a server the bot is not in, or the bot lacks "
-                "'Use Slash Commands' permission in that server. "
-                "Falling back to global sync.",
-                guild_id,
-            )
-            try:
-                cmds = await self.tree.sync()
-                logger.info("commands_synced_globally", extra={"count": len(cmds)})
-            except Exception as e:
-                logger.error("global_sync_failed: %s", e)
-        except Exception as e:
-            logger.error("sync_failed: %s", e)
+        except Exception:
+            logger.exception("command sync failed")
 
 
 async def main() -> None:
