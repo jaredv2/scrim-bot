@@ -169,7 +169,7 @@ class ScheduleCog(commands.Cog):
         scheduled_ev = get_event(event_id) or ev
         sent = await channel.send(embed=build_schedule_embed(scheduled_ev), view=InterestView(event_id))
         execute(
-            "UPDATE events SET schedule_message_id = ? WHERE id = ?",
+            "UPDATE vtx_events SET schedule_message_id = %s WHERE id = %s",
             (str(sent.id), event_id),
         )
 
@@ -224,7 +224,7 @@ class ScheduleCog(commands.Cog):
             return
         now = time.time()
         upcoming = query(
-            "SELECT * FROM events WHERE scheduled_at IS NOT NULL AND reminder_sent = 0",
+            "SELECT * FROM vtx_events WHERE scheduled_at IS NOT NULL AND reminder_sent = 0",
         )
         for ev in upcoming:
             ts = int(ev["scheduled_at"])

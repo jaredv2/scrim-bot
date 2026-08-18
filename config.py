@@ -60,6 +60,10 @@ class Settings(BaseSettings):
 
     database_path: str = str(Path(__file__).parent / "data" / "scrim.db")
 
+    # Supabase Postgres connection string (postgresql://user:pass@host:5432/db).
+    # When set, the bot uses Postgres instead of the local SQLite file.
+    supabase_db_url: str = ""
+
 
 settings = Settings()
 

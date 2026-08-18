@@ -116,15 +116,15 @@ def register_team(ev: dict, members: list[tuple[str, str]], skin: str) -> dict:
     lead_id, lead_name = members[0]
     team_json = ",".join(team_ids[1:]) if len(team_ids) > 1 else None
     execute(
-        "INSERT INTO registrations "
+        "INSERT INTO vtx_registrations "
         "(event_id, discord_id, username, team_members, skin, status) "
-        "VALUES (?, ?, ?, ?, ?, 'confirmed')",
+        "VALUES (%s, %s, %s, %s, %s, 'confirmed')",
         (ev["id"], lead_id, lead_name, team_json, skin),
     )
 
     igns = []
     for did in team_ids:
-        p = query_one("SELECT game_username FROM players WHERE discord_id = ?", (did,))
+        p = query_one("SELECT game_username FROM vtx_players WHERE discord_id = %s", (did,))
         igns.append(p["game_username"] if p and p["game_username"] else None)
 
     team_parts = []
@@ -179,7 +179,7 @@ class IGNModal(ui.Modal, title="In-Game Name"):
             self.skin_result = self._skin_input.value.strip()
         discord_id = str(interaction.user.id)
         execute(
-            "UPDATE players SET game_username = ? WHERE discord_id = ?",
+            "UPDATE vtx_players SET game_username = %s WHERE discord_id = %s",
             (self.result, discord_id),
         )
         await interaction.response.defer()
@@ -251,7 +251,7 @@ class RegisterView(ui.View):
             return
 
         existing = query_one(
-            "SELECT * FROM registrations WHERE event_id = ? AND discord_id = ?",
+            "SELECT * FROM vtx_registrations WHERE event_id = %s AND discord_id = %s",
             (ev["id"], discord_id),
         )
         if existing and existing["status"] == "confirmed":
@@ -261,7 +261,7 @@ class RegisterView(ui.View):
             return
 
         upsert_player(discord_id, username)
-        player = query_one("SELECT * FROM players WHERE discord_id = ?", (discord_id,))
+        player = query_one("SELECT * FROM vtx_players WHERE discord_id = %s", (discord_id,))
 
         if not player or not player["game_username"]:
             modal = IGNModal(event_id=ev["id"])
@@ -278,15 +278,15 @@ class RegisterView(ui.View):
 
         if existing:
             execute(
-                "UPDATE registrations SET username = ?, team_members = NULL, "
+                "UPDATE vtx_registrations SET username = %s, team_members = NULL, "
                 "status = 'confirmed' WHERE id = ?",
                 (username, existing["id"]),
             )
         else:
             execute(
-                "INSERT INTO registrations "
+                "INSERT INTO vtx_registrations "
                 "(event_id, discord_id, username, status) "
-                "VALUES (?, ?, ?, 'confirmed')",
+                "VALUES (%s, %s, %s, 'confirmed')",
                 (ev["id"], discord_id, username),
             )
 
@@ -315,7 +315,7 @@ class RegisterView(ui.View):
             return
 
         pending = query_one(
-            "SELECT * FROM pending_registrations WHERE event_id = ? AND discord_id = ?",
+            "SELECT * FROM vtx_pending_registrations WHERE event_id = %s AND discord_id = %s",
             (ev["id"], str(interaction.user.id)),
         )
         if pending:
@@ -328,7 +328,7 @@ class RegisterView(ui.View):
         discord_id = str(interaction.user.id)
         username = interaction.user.display_name
         upsert_player(discord_id, username)
-        player = query_one("SELECT * FROM players WHERE discord_id = ?", (discord_id,))
+        player = query_one("SELECT * FROM vtx_players WHERE discord_id = %s", (discord_id,))
 
         if not player or not player["game_username"]:
             modal = IGNModal(event_id=ev["id"], team_size=self.team_size)
@@ -358,8 +358,8 @@ class RegisterView(ui.View):
         )
 
         execute(
-            "INSERT INTO pending_registrations (event_id, discord_id, prompt_message_id, skin) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO vtx_pending_registrations (event_id, discord_id, prompt_message_id, skin) "
+            "VALUES (%s, %s, %s, %s)",
             (ev["id"], discord_id, str(prompt.id), skin),
         )
 
@@ -389,8 +389,8 @@ class RegistrationHandler(commands.Cog):
         me = message.guild.get_member(self.bot.user.id)
         if me and me in message.mentions and not message.reference:
             open_event = query_one(
-                "SELECT * FROM events WHERE status = 'registration' "
-                "AND (signup_channel_id = ? OR channel_id = ?) ORDER BY id DESC LIMIT 1",
+                "SELECT * FROM vtx_events WHERE status = 'registration' "
+                "AND (signup_channel_id = %s OR channel_id = %s) ORDER BY id DESC LIMIT 1",
                 (str(message.channel.id), str(message.channel.id)),
             )
             if open_event:
@@ -421,7 +421,7 @@ class RegistrationHandler(commands.Cog):
             return
 
         pending = query_one(
-            "SELECT * FROM pending_registrations WHERE prompt_message_id = ?",
+            "SELECT * FROM vtx_pending_registrations WHERE prompt_message_id = %s",
             (str(replied.id),),
         )
         if not pending:
@@ -453,7 +453,7 @@ class RegistrationHandler(commands.Cog):
                 f"🚫 {'One or more players' if len(banned) > 1 else banned[0].mention + ' is'} banned from registering.",
                 delete_after=15,
             )
-            execute("DELETE FROM pending_registrations WHERE id = ?", (pending["id"],))
+            execute("DELETE FROM vtx_pending_registrations WHERE id = %s", (pending["id"],))
             return
 
         for m in [message.author] + members:
@@ -463,7 +463,7 @@ class RegistrationHandler(commands.Cog):
                 await message.channel.send(
                     f"🚫 {m.mention}: {entry['reason']}", delete_after=15
                 )
-                execute("DELETE FROM pending_registrations WHERE id = ?", (pending["id"],))
+                execute("DELETE FROM vtx_pending_registrations WHERE id = %s", (pending["id"],))
                 return
 
         max_players = ev.get("max_players") or 0
@@ -473,13 +473,13 @@ class RegistrationHandler(commands.Cog):
                 "🚫 **The event is full!** This team can't be added.",
                 delete_after=15,
             )
-            execute("DELETE FROM pending_registrations WHERE id = ?", (pending["id"],))
+            execute("DELETE FROM vtx_pending_registrations WHERE id = %s", (pending["id"],))
             return
 
         missing_igns = []
         for m in members:
             did = str(m.id)
-            p = query_one("SELECT game_username FROM players WHERE discord_id = ?", (did,))
+            p = query_one("SELECT game_username FROM vtx_players WHERE discord_id = %s", (did,))
             if not p or not p["game_username"]:
                 missing_igns.append(m)
 
@@ -491,7 +491,7 @@ class RegistrationHandler(commands.Cog):
                 f"{'They needs' if len(missing_igns) == 1 else 'They need'} to use `/change-ign` first.",
                 delete_after=15,
             )
-            execute("DELETE FROM pending_registrations WHERE id = ?", (pending["id"],))
+            execute("DELETE FROM vtx_pending_registrations WHERE id = %s", (pending["id"],))
             return
 
         lead = message.guild.get_member(int(pending["discord_id"]))
@@ -521,22 +521,22 @@ class RegistrationHandler(commands.Cog):
                     f"❌ {', '.join(overlap_names)} already registered.",
                     delete_after=10,
                 )
-                execute("DELETE FROM pending_registrations WHERE id = ?", (pending["id"],))
+                execute("DELETE FROM vtx_pending_registrations WHERE id = %s", (pending["id"],))
                 return
 
         team_json = ",".join(discord_ids[1:]) if len(discord_ids) > 1 else None
         skin = pending.get("skin")
         execute(
-            "INSERT INTO registrations "
+            "INSERT INTO vtx_registrations "
             "(event_id, discord_id, username, team_members, skin, status) "
-            "VALUES (?, ?, ?, ?, ?, 'confirmed')",
+            "VALUES (%s, %s, %s, %s, %s, 'confirmed')",
             (ev["id"], discord_ids[0], usernames[0], team_json, skin),
         )
-        execute("DELETE FROM pending_registrations WHERE id = ?", (pending["id"],))
+        execute("DELETE FROM vtx_pending_registrations WHERE id = %s", (pending["id"],))
 
         igns = []
         for did in discord_ids:
-            p = query_one("SELECT game_username FROM players WHERE discord_id = ?", (did,))
+            p = query_one("SELECT game_username FROM vtx_players WHERE discord_id = %s", (did,))
             ign = p["game_username"] if p and p["game_username"] else None
             igns.append(ign)
 
@@ -570,8 +570,8 @@ class RegistrationHandler(commands.Cog):
         if message.guild is None:
             return False
         ev = query_one(
-            "SELECT * FROM events WHERE status = 'registration' AND team_size >= 2 "
-            "AND (signup_channel_id = ? OR (signup_channel_id IS NULL AND channel_id = ?)) "
+            "SELECT * FROM vtx_events WHERE status = 'registration' AND team_size >= 2 "
+            "AND (signup_channel_id = %s OR (signup_channel_id IS NULL AND channel_id = %s)) "
             "ORDER BY id DESC LIMIT 1",
             (str(message.channel.id), str(message.channel.id)),
         )

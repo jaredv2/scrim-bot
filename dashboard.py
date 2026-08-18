@@ -131,94 +131,10 @@ async def health():
 
 @app.get("/backup/download")
 async def backup_download(user: dict = Depends(get_current_user)):
-    """
-    Streams a safe, consistent snapshot of the SQLite database as a download.
-
-    Context (from database.py):
-    - The app runs in WAL mode (`PRAGMA journal_mode=WAL`), so recent commits
-      can live in a `<db>-wal` sidecar file rather than the main .db file.
-    - The app holds one long-lived connection per thread (`_local.conn`) that
-      never closes between requests, so the automatic "checkpoint on close"
-      that WAL relies on almost never fires -- most of your real data sits
-      in `<db>-wal`, not the main .db file.
-
-    Because of that, a raw `shutil.copy2()` of the .db file (the original
-    implementation) copies a file that structurally never contains your
-    committed rows -- which is why the old backups always came out empty.
-    Instead:
-      1. We run `PRAGMA wal_checkpoint(TRUNCATE)` on a fresh connection to
-         fold any pending WAL data back into the main .db file and truncate
-         the -wal file. This is safe to run concurrently with the app's own
-         connection -- it doesn't lock out other readers/writers for long.
-      2. We use SQLite's online backup API (`Connection.backup()`) to copy
-         the now-checkpointed database. This API is explicitly designed to
-         produce a consistent snapshot even while other connections (like
-         the app's persistent one) are open on the same file.
-    """
-    import sqlite3
-    import tempfile
-
-    db_path = Path(settings.database_path)
-    print(f"[DEBUG] backup_download called by user, source db_path={db_path}")
-
-    if not db_path.exists():
-        print(f"[ERROR] Database file not found at {db_path}")
-        raise HTTPException(status_code=404, detail="Database file not found")
-
-    tmp_path = None
-    checkpoint_conn = None
-    source_conn = None
-    dest_conn = None
-
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_path = tmp.name
-        print(f"[DEBUG] Temp backup target: {tmp_path}")
-
-        # Step 1: fold WAL data into the main file so the backup is self-contained.
-        print("[DEBUG] Running WAL checkpoint (TRUNCATE) before backup...")
-        checkpoint_conn = sqlite3.connect(str(db_path))
-        result = checkpoint_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()
-        print(f"[DEBUG] Checkpoint result (busy, log_pages, checkpointed_pages): {result}")
-        checkpoint_conn.close()
-        checkpoint_conn = None
-
-        # Step 2: online backup to the temp file.
-        print("[DEBUG] Running SQLite online backup...")
-        source_conn = sqlite3.connect(str(db_path))
-        dest_conn = sqlite3.connect(tmp_path)
-        source_conn.backup(dest_conn)
-        dest_conn.close()
-        source_conn.close()
-        source_conn = dest_conn = None
-        print("[DEBUG] Backup completed successfully.")
-
-        with open(tmp_path, "rb") as f:
-            data = f.read()
-        print(f"[DEBUG] Backup file size: {len(data)} bytes")
-
-    except sqlite3.Error as e:
-        print(f"[ERROR] SQLite error during backup: {e}")
-        raise HTTPException(status_code=500, detail=f"Backup failed: {e}")
-    except Exception as e:
-        print(f"[ERROR] Unexpected error during backup: {e}")
-        raise HTTPException(status_code=500, detail="Backup failed due to an internal error")
-    finally:
-        # Defensive cleanup in case an exception happened mid-way.
-        for conn in (checkpoint_conn, source_conn, dest_conn):
-            if conn is not None:
-                conn.close()
-        if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
-            print(f"[DEBUG] Temp file cleaned up: {tmp_path}")
-
-    from fastapi.responses import Response
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    filename = f"scrim_backup_{timestamp}.db"
-    return Response(
-        content=data,
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    """Backups are managed by Supabase when running on Postgres."""
+    raise HTTPException(
+        status_code=400,
+        detail="Backups are managed in Supabase (Database > Backups) when running on Postgres.",
     )
 
 
@@ -229,104 +145,17 @@ async def restore_db(
     user: dict = Depends(get_current_user),
     file: UploadFile = File(...),
 ):
-    """Replace the live SQLite database with an uploaded backup, safely.
-
-    Steps (no timing guesses, real signals only):
-      1. Stream the upload to a temp file next to the real DB.
-      2. Validate it with `PRAGMA integrity_check` before touching anything.
-      3. Close this process's cached connections (epoch bump) so no request
-         writes to the old file after the swap.
-      4. Remove stale WAL/SHM sidecars, back up the current DB to .db.bak
-         (best-effort, via SQLite online backup), then atomically swap the
-         temp file into place with os.replace().
-      5. Write a marker file so the bot process reloads its connections on its
-         next poll (within ~3s), then verify the new file opens.
-    """
-    import shutil
-    import tempfile
-
-    from database import (
-        _get_conn,
-        mark_db_restored,
-        reload_db_now,
+    """Restoring a SQLite file is not supported on Postgres."""
+    raise HTTPException(
+        status_code=400,
+        detail="Restoring a SQLite backup is not supported when running on Postgres. Use Supabase (Database > Restore) instead.",
     )
-
-    db_path = Path(settings.database_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    tmp_path = None
-    try:
-        fd, tmp_path = tempfile.mkstemp(suffix=".db", dir=str(db_path.parent))
-        with os.fdopen(fd, "wb") as out:
-            while chunk := await file.read(1024 * 1024):
-                out.write(chunk)
-        print(f"[RESTORE] upload saved to {tmp_path}")
-
-        try:
-            test_conn = sqlite3.connect(tmp_path)
-            result = test_conn.execute("PRAGMA integrity_check;").fetchone()
-            test_conn.close()
-        except sqlite3.Error:
-            result = ["not a database"]
-        print(f"[RESTORE] integrity check: {result}")
-        if not result or result[0] != "ok":
-            raise HTTPException(
-                status_code=400,
-                detail="Uploaded file is not a valid SQLite database",
-            )
-
-        if db_path.exists():
-            try:
-                bak = db_path.with_suffix(db_path.suffix + ".bak")
-                src = sqlite3.connect(str(db_path))
-                dst = sqlite3.connect(str(bak))
-                src.backup(dst)
-                dst.close()
-                src.close()
-                print(f"[RESTORE] previous db backed up to {bak}")
-            except Exception as e:
-                print(f"[RESTORE] backup of current db skipped: {e}")
-
-        reload_db_now()
-        for ext in ("-wal", "-shm", "-journal"):
-            sidecar = Path(str(db_path) + ext)
-            if sidecar.exists():
-                try:
-                    sidecar.unlink()
-                    print(f"[RESTORE] removed stale {sidecar}")
-                except OSError as e:
-                    print(f"[RESTORE] could not remove {sidecar}: {e} (continuing)")
-
-        os.replace(tmp_path, str(db_path))
-        tmp_path = None
-        print(f"[RESTORE] {db_path} replaced with restored data")
-
-        mark_db_restored()
-        print("[RESTORE] restart marker written, bot will reload")
-
-        conn = _get_conn()
-        conn.execute("SELECT 1").fetchone()
-        print("[RESTORE] dashboard reconnected to new database")
-
-        return JSONResponse({"status": "restored"})
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[RESTORE] ERROR: {e}")
-        if tmp_path is not None and os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise HTTPException(status_code=500, detail=f"Restore failed: {e}")
-
-    init_db()
-
-    return RedirectResponse(url="/", status_code=302)
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, user: dict = Depends(get_current_user)):
     events = query(
-        "SELECT * FROM events ORDER BY created_at DESC LIMIT 50"
+        "SELECT * FROM vtx_events ORDER BY created_at DESC LIMIT 50"
     )
     return templates.TemplateResponse(
         request, "index.html", {"events": events, "user": user}
@@ -338,8 +167,8 @@ async def home(request: Request):
     """Public landing page — no login required."""
     events = query(
         "SELECT id, name, status, team_size, event_type, region, "
-        "(SELECT COUNT(*) FROM registrations r WHERE r.event_id = e.id AND r.status = 'confirmed') AS players "
-        "FROM events e ORDER BY created_at DESC LIMIT 25"
+        "(SELECT COUNT(*) FROM vtx_registrations r WHERE r.event_id = e.id AND r.status = 'confirmed') AS players "
+        "FROM vtx_events e ORDER BY created_at DESC LIMIT 25"
     )
     from database import get_players_leaderboard
 
@@ -526,14 +355,14 @@ async def event_detail(request: Request, event_id: int, user: dict = Depends(get
         if r.get("team_members"):
             for mid in r["team_members"].split(","):
                 if mid not in player_map:
-                    p = query_one("SELECT username FROM players WHERE discord_id = ?", (mid,))
+                    p = query_one("SELECT username FROM vtx_players WHERE discord_id = %s", (mid,))
                     if p:
                         player_map[mid] = p["username"]
 
     all_discord_ids = set(player_map.keys())
     if all_discord_ids:
-        placeholders = ",".join(["?"] * len(all_discord_ids))
-        players = query(f"SELECT discord_id, game_username FROM players WHERE discord_id IN ({placeholders})", tuple(all_discord_ids))
+        placeholders = ",".join(["%s"] * len(all_discord_ids))
+        players = query(f"SELECT discord_id, game_username FROM vtx_players WHERE discord_id IN ({placeholders})", tuple(all_discord_ids))
         for p in players:
             if p["game_username"]:
                 ign_map[p["discord_id"]] = p["game_username"]
@@ -584,7 +413,7 @@ async def game_detail(
 ):
     ev = get_event(event_id)
     game = query_one(
-        "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+        "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
         (event_id, game_number),
     )
     if not game:
@@ -603,13 +432,13 @@ async def game_detail(
             if r.get("team_members"):
                 for mid in r["team_members"].split(","):
                     if mid not in player_map:
-                        p = query_one("SELECT username FROM players WHERE discord_id = ?", (mid,))
+                        p = query_one("SELECT username FROM vtx_players WHERE discord_id = %s", (mid,))
                         if p:
                             player_map[mid] = p["username"]
         all_ids = set(player_map.keys())
         if all_ids:
-            ph = ",".join(["?"] * len(all_ids))
-            pls = query(f"SELECT discord_id, game_username FROM players WHERE discord_id IN ({ph})", tuple(all_ids))
+            ph = ",".join(["%s"] * len(all_ids))
+            pls = query(f"SELECT discord_id, game_username FROM vtx_players WHERE discord_id IN ({ph})", tuple(all_ids))
             for pl in pls:
                 if pl["game_username"]:
                     ign_map[pl["discord_id"]] = pl["game_username"]
@@ -621,7 +450,7 @@ async def game_detail(
         for t in team_board:
             if not t.get("is_dq"):
                 winner_team = t
-                wp = query_one("SELECT game_username FROM players WHERE discord_id = ?", (t["lead_id"],))
+                wp = query_one("SELECT game_username FROM vtx_players WHERE discord_id = %s", (t["lead_id"],))
                 if wp and wp["game_username"]:
                     winner_ign = wp["game_username"]
                 break
@@ -629,7 +458,7 @@ async def game_detail(
         for p in players:
             if p.get("placement") == 1 and not p.get("is_disqualified"):
                 winner = p
-                wp = query_one("SELECT game_username FROM players WHERE discord_id = ?", (p["discord_id"],))
+                wp = query_one("SELECT game_username FROM vtx_players WHERE discord_id = %s", (p["discord_id"],))
                 if wp and wp["game_username"]:
                     winner_ign = wp["game_username"]
                 break
@@ -723,7 +552,7 @@ async def create_event(request: Request, user: dict = Depends(get_current_user))
 async def set_room_code(event_id: int, request: Request, user: dict = Depends(get_current_user)):
     form = await request.form()
     room_code = form.get("room_code", "")
-    execute("UPDATE events SET room_code = ? WHERE id = ?", (room_code, event_id))
+    execute("UPDATE vtx_events SET room_code = %s WHERE id = %s", (room_code, event_id))
     return RedirectResponse(url=f"/event/{event_id}", status_code=302)
 
 
@@ -735,13 +564,13 @@ async def assign_points(event_id: int, request: Request, user: dict = Depends(ge
     points = int(form.get("points", 0))
 
     game = query_one(
-        "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+        "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
         (event_id, game_number),
     )
     if game:
         execute(
-            "UPDATE game_players SET points = points + ? "
-            "WHERE game_id = ? AND player_id = ?",
+            "UPDATE vtx_game_players SET points = points + %s "
+            "WHERE game_id = %s AND player_id = %s",
             (points, game["id"], player_id),
         )
     return RedirectResponse(url=f"/event/{event_id}", status_code=302)
@@ -754,13 +583,13 @@ async def dq_player(event_id: int, request: Request, user: dict = Depends(get_cu
     player_id = int(form.get("player_id", 0))
 
     game = query_one(
-        "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+        "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
         (event_id, game_number),
     )
     if game:
         execute(
-            "UPDATE game_players SET is_disqualified = 1, points = 0 "
-            "WHERE game_id = ? AND player_id = ?",
+            "UPDATE vtx_game_players SET is_disqualified = 1, points = 0 "
+            "WHERE game_id = %s AND player_id = %s",
             (game["id"], player_id),
         )
     return RedirectResponse(url=f"/event/{event_id}", status_code=302)
@@ -770,7 +599,7 @@ async def dq_player(event_id: int, request: Request, user: dict = Depends(get_cu
 async def create_lobby(event_id: int, request: Request, user: dict = Depends(get_current_user)):
     form = await request.form()
     name = form.get("name", "Lobby")
-    execute("INSERT INTO lobbies (event_id, name) VALUES (?, ?)", (event_id, name))
+    execute("INSERT INTO vtx_lobbies (event_id, name) VALUES (%s, %s)", (event_id, name))
     return RedirectResponse(url=f"/event/{event_id}", status_code=302)
 
 
@@ -778,8 +607,8 @@ async def create_lobby(event_id: int, request: Request, user: dict = Depends(get
 async def set_lobby_code(lobby_id: int, request: Request, user: dict = Depends(get_current_user)):
     form = await request.form()
     room_code = form.get("room_code", "")
-    execute("UPDATE lobbies SET room_code = ? WHERE id = ?", (room_code, lobby_id))
-    lobby = query_one("SELECT event_id FROM lobbies WHERE id = ?", (lobby_id,))
+    execute("UPDATE vtx_lobbies SET room_code = %s WHERE id = %s", (room_code, lobby_id))
+    lobby = query_one("SELECT event_id FROM vtx_lobbies WHERE id = %s", (lobby_id,))
     eid = lobby["event_id"] if lobby else 0
     return RedirectResponse(url=f"/event/{eid}", status_code=302)
 
@@ -788,7 +617,7 @@ async def set_lobby_code(lobby_id: int, request: Request, user: dict = Depends(g
 async def update_status(event_id: int, request: Request, user: dict = Depends(get_current_user)):
     form = await request.form()
     status = form.get("status", "setup")
-    execute("UPDATE events SET status = ? WHERE id = ?", (status, event_id))
+    execute("UPDATE vtx_events SET status = %s WHERE id = %s", (status, event_id))
     return RedirectResponse(url=f"/event/{event_id}", status_code=302)
 
 
@@ -806,14 +635,14 @@ async def ajax_quick_kill(event_id: int, request: Request, user: dict = Depends(
     if not discord_id:
         return JSONResponse({"error": "No player specified"}, status_code=400)
 
-    player = query_one("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+    player = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (discord_id,))
     if not player:
         return JSONResponse({"error": "Player not found in DB"}, status_code=404)
 
     player_id = player["id"]
     pts = ev.get("point_kill", 1)
     game = query_one(
-        "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+        "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
         (event_id, game_number),
     )
     if not game:
@@ -822,22 +651,22 @@ async def ajax_quick_kill(event_id: int, request: Request, user: dict = Depends(
         game_id = game["id"]
 
     existing = query_one(
-        "SELECT * FROM game_players WHERE game_id = ? AND player_id = ?",
+        "SELECT * FROM vtx_game_players WHERE game_id = %s AND player_id = %s",
         (game_id, player_id),
     )
     if existing:
         execute(
-            "UPDATE game_players SET kills = kills + 1, points = points + ? "
-            "WHERE game_id = ? AND player_id = ?",
+            "UPDATE vtx_game_players SET kills = kills + 1, points = points + %s "
+            "WHERE game_id = %s AND player_id = %s",
             (pts, game_id, player_id),
         )
     else:
         execute(
-            "INSERT INTO game_players (game_id, player_id, kills, points) VALUES (?, ?, 1, ?)",
+            "INSERT INTO vtx_game_players (game_id, player_id, kills, points) VALUES (%s, %s, 1, %s)",
             (game_id, player_id, pts),
         )
 
-    p = query_one("SELECT username FROM players WHERE id = ?", (player_id,))
+    p = query_one("SELECT username FROM vtx_players WHERE id = %s", (player_id,))
     return JSONResponse({
         "ok": True,
         "player": p["username"] if p else "?",
@@ -859,14 +688,14 @@ async def ajax_quick_win(event_id: int, request: Request, user: dict = Depends(g
     if not discord_id:
         return JSONResponse({"error": "No player specified"}, status_code=400)
 
-    player = query_one("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+    player = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (discord_id,))
     if not player:
         return JSONResponse({"error": "Player not found in DB"}, status_code=404)
 
     player_id = player["id"]
     pts = ev.get("point_win", 5)
     game = query_one(
-        "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+        "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
         (event_id, game_number),
     )
     if not game:
@@ -875,23 +704,23 @@ async def ajax_quick_win(event_id: int, request: Request, user: dict = Depends(g
         game_id = game["id"]
 
     existing = query_one(
-        "SELECT * FROM game_players WHERE game_id = ? AND player_id = ?",
+        "SELECT * FROM vtx_game_players WHERE game_id = %s AND player_id = %s",
         (game_id, player_id),
     )
     if existing:
         execute(
-            "UPDATE game_players SET points = points + ?, placement = 1 "
-            "WHERE game_id = ? AND player_id = ?",
+            "UPDATE vtx_game_players SET points = points + %s, placement = 1 "
+            "WHERE game_id = %s AND player_id = %s",
             (pts, game_id, player_id),
         )
     else:
         execute(
-            "INSERT INTO game_players (game_id, player_id, points, placement) "
-            "VALUES (?, ?, ?, 1)",
+            "INSERT INTO vtx_game_players (game_id, player_id, points, placement) "
+            "VALUES (%s, %s, %s, 1)",
             (game_id, player_id, pts),
         )
 
-    p = query_one("SELECT username FROM players WHERE id = ?", (player_id,))
+    p = query_one("SELECT username FROM vtx_players WHERE id = %s", (player_id,))
     return JSONResponse({
         "ok": True,
         "player": p["username"] if p else "?",
@@ -906,7 +735,7 @@ async def ajax_placement_status(event_id: int, game_number: int = 1, user: dict 
     if not ev:
         return JSONResponse({"error": "Event not found"}, status_code=404)
     game = query_one(
-        "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+        "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
         (event_id, game_number),
     )
     if not game:
@@ -914,7 +743,7 @@ async def ajax_placement_status(event_id: int, game_number: int = 1, user: dict 
 
     team_size = ev.get("team_size", 1) or 1
     registrations = query(
-        "SELECT * FROM registrations WHERE event_id = ? AND status = 'confirmed'",
+        "SELECT * FROM vtx_registrations WHERE event_id = %s AND status = 'confirmed'",
         (event_id,),
     )
     if team_size >= 2:
@@ -925,9 +754,9 @@ async def ajax_placement_status(event_id: int, game_number: int = 1, user: dict 
     placed_map = {
         str(row["discord_id"]): row["placement"]
         for row in query(
-            "SELECT pl.discord_id, gp.placement FROM game_players gp "
-            "JOIN players pl ON pl.id = gp.player_id "
-            "WHERE gp.game_id = ? AND gp.placement IS NOT NULL",
+            "SELECT pl.discord_id, gp.placement FROM vtx_game_players gp "
+            "JOIN vtx_players pl ON pl.id = gp.player_id "
+            "WHERE gp.game_id = %s AND gp.placement IS NOT NULL",
             (game["id"],),
         )
     }
@@ -952,12 +781,12 @@ async def ajax_qualify(event_id: int, request: Request, user: dict = Depends(get
     ev = get_event(event_id)
     if not ev:
         return JSONResponse({"error": "Event not found"}, status_code=404)
-    player = query_one("SELECT username FROM players WHERE discord_id = ?", (discord_id,))
+    player = query_one("SELECT username FROM vtx_players WHERE discord_id = %s", (discord_id,))
     if not player:
         return JSONResponse({"error": "Player not found"}, status_code=404)
 
     existing = query_one(
-        "SELECT * FROM event_qualifiers WHERE event_id = ? AND discord_id = ?",
+        "SELECT * FROM vtx_event_qualifiers WHERE event_id = %s AND discord_id = %s",
         (event_id, discord_id),
     )
     if existing:
@@ -965,7 +794,7 @@ async def ajax_qualify(event_id: int, request: Request, user: dict = Depends(get
         qualified = False
     else:
         reg = query_one(
-            "SELECT * FROM registrations WHERE event_id = ? AND discord_id = ?",
+            "SELECT * FROM vtx_registrations WHERE event_id = %s AND discord_id = %s",
             (event_id, discord_id),
         )
         team_members = reg.get("team_members") if reg else None
@@ -989,12 +818,12 @@ async def ajax_eliminate(event_id: int, request: Request, user: dict = Depends(g
     if not ev:
         return JSONResponse({"error": "Event not found"}, status_code=404)
 
-    player = query_one("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+    player = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (discord_id,))
     if not player:
         return JSONResponse({"error": "Player not found in DB"}, status_code=404)
 
     game = query_one(
-        "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+        "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
         (event_id, game_number),
     )
     if game and game["status"] == "completed":
@@ -1007,7 +836,7 @@ async def ajax_eliminate(event_id: int, request: Request, user: dict = Depends(g
 
     team_size = ev.get("team_size", 1) or 1
     registrations = query(
-        "SELECT * FROM registrations WHERE event_id = ? AND status = 'confirmed'",
+        "SELECT * FROM vtx_registrations WHERE event_id = %s AND status = 'confirmed'",
         (event_id,),
     )
     if team_size >= 2:
@@ -1017,42 +846,42 @@ async def ajax_eliminate(event_id: int, request: Request, user: dict = Depends(g
     total_participants = len(participants)
 
     existing = query_one(
-        "SELECT * FROM game_players WHERE game_id = ? AND player_id = ?",
+        "SELECT * FROM vtx_game_players WHERE game_id = %s AND player_id = %s",
         (game_id, player["id"]),
     )
 
     undo = existing and existing.get("placement") is not None
     if undo:
         execute(
-            "UPDATE game_players SET placement = NULL WHERE game_id = ? AND player_id = ?",
+            "UPDATE vtx_game_players SET placement = NULL WHERE game_id = %s AND player_id = %s",
             (game_id, player["id"]),
         )
         placed_after = query(
-            "SELECT id FROM game_players WHERE game_id = ? AND placement IS NOT NULL "
+            "SELECT id FROM vtx_game_players WHERE game_id = %s AND placement IS NOT NULL "
             "ORDER BY placement DESC",
             (game_id,),
         )
         for i, row in enumerate(placed_after):
             execute(
-                "UPDATE game_players SET placement = ? WHERE id = ?",
+                "UPDATE vtx_game_players SET placement = %s WHERE id = %s",
                 (total_participants - i, row["id"]),
             )
         placement = None
     else:
         already_eliminated = query(
-            "SELECT * FROM game_players WHERE game_id = ? AND placement IS NOT NULL",
+            "SELECT * FROM vtx_game_players WHERE game_id = %s AND placement IS NOT NULL",
             (game_id,),
         )
         placement = total_participants - len(already_eliminated)
         if existing:
             execute(
-                "UPDATE game_players SET placement = ? WHERE game_id = ? AND player_id = ?",
+                "UPDATE vtx_game_players SET placement = %s WHERE game_id = %s AND player_id = %s",
                 (placement, game_id, player["id"]),
             )
         else:
             execute(
-                "INSERT INTO game_players (game_id, player_id, placement, points) "
-                "VALUES (?, ?, ?, 0)",
+                "INSERT INTO vtx_game_players (game_id, player_id, placement, points) "
+                "VALUES (%s, %s, %s, 0)",
                 (game_id, player["id"], placement),
             )
 
@@ -1062,9 +891,9 @@ async def ajax_eliminate(event_id: int, request: Request, user: dict = Depends(g
     placed_map = {
         str(row["discord_id"]): row["placement"]
         for row in query(
-            "SELECT pl.discord_id, gp.placement FROM game_players gp "
-            "JOIN players pl ON pl.id = gp.player_id "
-            "WHERE gp.game_id = ? AND gp.placement IS NOT NULL",
+            "SELECT pl.discord_id, gp.placement FROM vtx_game_players gp "
+            "JOIN vtx_players pl ON pl.id = gp.player_id "
+            "WHERE gp.game_id = %s AND gp.placement IS NOT NULL",
             (game_id,),
         )
     }
@@ -1077,7 +906,7 @@ async def ajax_eliminate(event_id: int, request: Request, user: dict = Depends(g
             projected.append({"discord_id": pid, "placement": None, "projected": live_rank})
             live_rank += 1
 
-    p = query_one("SELECT username FROM players WHERE id = ?", (player["id"],))
+    p = query_one("SELECT username FROM vtx_players WHERE id = %s", (player["id"],))
     return JSONResponse({
         "ok": True,
         "player": p["username"] if p else "?",
@@ -1104,7 +933,7 @@ async def ajax_mark_teammate_eliminated(event_id: int, request: Request, user: d
         return JSONResponse({"error": "Event not found"}, status_code=404)
 
     game = query_one(
-        "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+        "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
         (event_id, game_number),
     )
     if not game:
@@ -1138,18 +967,18 @@ async def ajax_update_points(
     updates = []
     params = []
     if point_kill is not None:
-        updates.append("point_kill = ?")
+        updates.append("point_kill = %s")
         params.append(int(point_kill))
     if point_win is not None:
-        updates.append("point_win = ?")
+        updates.append("point_win = %s")
         params.append(int(point_win))
     if placement_scale is not None:
-        updates.append("placement_scale = ?")
+        updates.append("placement_scale = %s")
         params.append(placement_scale)
 
     if updates:
         params.append(event_id)
-        execute(f"UPDATE events SET {', '.join(updates)} WHERE id = ?", tuple(params))
+        execute(f"UPDATE vtx_events SET {', '.join(updates)} WHERE id = %s", tuple(params))
     return JSONResponse({"ok": True})
 
 
@@ -1163,30 +992,30 @@ async def ajax_dq_player(event_id: int, request: Request, user: dict = Depends(g
     if not discord_id:
         return JSONResponse({"error": "No player specified"}, status_code=400)
 
-    player = query_one("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+    player = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (discord_id,))
     if not player:
         return JSONResponse({"error": "Player not found in DB"}, status_code=404)
 
     player_id = player["id"]
     games = query(
-        "SELECT id FROM games WHERE event_id = ? AND status IN ('in_progress', 'waiting')",
+        "SELECT id FROM vtx_games WHERE event_id = %s AND status IN ('in_progress', 'waiting')",
         (event_id,),
     )
     for g in games:
         existing = query_one(
-            "SELECT id FROM game_players WHERE game_id = ? AND player_id = ?",
+            "SELECT id FROM vtx_game_players WHERE game_id = %s AND player_id = %s",
             (g["id"], player_id),
         )
         if existing:
             execute(
-                "UPDATE game_players SET is_disqualified = 1, points = 0 "
-                "WHERE game_id = ? AND player_id = ?",
+                "UPDATE vtx_game_players SET is_disqualified = 1, points = 0 "
+                "WHERE game_id = %s AND player_id = %s",
                 (g["id"], player_id),
             )
         else:
             execute(
-                "INSERT INTO game_players (game_id, player_id, is_disqualified, points) "
-                "VALUES (?, ?, 1, 0)",
+                "INSERT INTO vtx_game_players (game_id, player_id, is_disqualified, points) "
+                "VALUES (%s, %s, 1, 0)",
                 (g["id"], player_id),
             )
 
@@ -1196,7 +1025,7 @@ async def ajax_dq_player(event_id: int, request: Request, user: dict = Depends(g
         "reason": reason,
     })
 
-    p = query_one("SELECT username FROM players WHERE id = ?", (player_id,))
+    p = query_one("SELECT username FROM vtx_players WHERE id = %s", (player_id,))
     return JSONResponse({"ok": True, "player": p["username"] if p else "?"})
 
 
@@ -1210,28 +1039,28 @@ async def ajax_remove_points(event_id: int, request: Request, user: dict = Depen
     if not discord_id:
         return JSONResponse({"error": "No player specified"}, status_code=400)
 
-    player = query_one("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+    player = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (discord_id,))
     if not player:
         return JSONResponse({"error": "Player not found in DB"}, status_code=404)
 
     player_id = player["id"]
     games = query(
-        "SELECT id FROM games WHERE event_id = ? AND status IN ('in_progress', 'waiting')",
+        "SELECT id FROM vtx_games WHERE event_id = %s AND status IN ('in_progress', 'waiting')",
         (event_id,),
     )
     for g in games:
         existing = query_one(
-            "SELECT id, points FROM game_players WHERE game_id = ? AND player_id = ?",
+            "SELECT id, points FROM vtx_game_players WHERE game_id = %s AND player_id = %s",
             (g["id"], player_id),
         )
         if existing:
             new_pts = max(0, existing["points"] - points)
             execute(
-                "UPDATE game_players SET points = ? WHERE game_id = ? AND player_id = ?",
+                "UPDATE vtx_game_players SET points = %s WHERE game_id = %s AND player_id = %s",
                 (new_pts, g["id"], player_id),
             )
 
-    p = query_one("SELECT username FROM players WHERE id = ?", (player_id,))
+    p = query_one("SELECT username FROM vtx_players WHERE id = %s", (player_id,))
     return JSONResponse({"ok": True, "player": p["username"] if p else "?"})
 
 
@@ -1259,10 +1088,10 @@ async def ajax_dispatch_kill(
     ev = get_event(event_id)
     k_name = "?"
     v_name = "?"
-    p = query_one("SELECT username FROM players WHERE discord_id = ?", (killer_id,))
+    p = query_one("SELECT username FROM vtx_players WHERE discord_id = %s", (killer_id,))
     if p:
         k_name = p["username"]
-    p = query_one("SELECT username FROM players WHERE discord_id = ?", (victim_id,))
+    p = query_one("SELECT username FROM vtx_players WHERE discord_id = %s", (victim_id,))
     if p:
         v_name = p["username"]
 
@@ -1301,44 +1130,44 @@ async def add_player(event_id: int, request: Request, user: dict = Depends(get_c
             lead_id, lead_name = players_to_add[0]
             team_ids = ",".join(p[0] for p in players_to_add[1:])
             existing = query_one(
-                "SELECT id FROM registrations WHERE event_id = ? AND discord_id = ?",
+                "SELECT id FROM vtx_registrations WHERE event_id = %s AND discord_id = %s",
                 (event_id, lead_id),
             )
             if not existing:
                 execute(
-                    "INSERT INTO registrations "
+                    "INSERT INTO vtx_registrations "
                     "(event_id, discord_id, username, team_members, status) "
-                    "VALUES (?, ?, ?, ?, 'confirmed')",
+                    "VALUES (%s, %s, %s, %s, 'confirmed')",
                     (event_id, lead_id, lead_name, team_ids),
                 )
             else:
                 execute(
-                    "UPDATE registrations SET team_members = ? WHERE id = ?",
+                    "UPDATE vtx_registrations SET team_members = %s WHERE id = %s",
                     (team_ids, existing["id"]),
                 )
             for did, uname in players_to_add[1:]:
                 existing2 = query_one(
-                    "SELECT id FROM registrations WHERE event_id = ? AND discord_id = ?",
+                    "SELECT id FROM vtx_registrations WHERE event_id = %s AND discord_id = %s",
                     (event_id, did),
                 )
                 if not existing2:
                     execute(
-                        "INSERT INTO registrations "
+                        "INSERT INTO vtx_registrations "
                         "(event_id, discord_id, username, status) "
-                        "VALUES (?, ?, ?, 'confirmed')",
+                        "VALUES (%s, %s, %s, 'confirmed')",
                         (event_id, did, uname),
                     )
         else:
             lead_id, lead_name = players_to_add[0]
             existing = query_one(
-                "SELECT id FROM registrations WHERE event_id = ? AND discord_id = ?",
+                "SELECT id FROM vtx_registrations WHERE event_id = %s AND discord_id = %s",
                 (event_id, lead_id),
             )
             if not existing:
                 execute(
-                    "INSERT INTO registrations "
+                    "INSERT INTO vtx_registrations "
                     "(event_id, discord_id, username, status) "
-                    "VALUES (?, ?, ?, 'confirmed')",
+                    "VALUES (%s, %s, %s, 'confirmed')",
                     (event_id, lead_id, lead_name),
                 )
 
@@ -1529,8 +1358,8 @@ async def players_search(q: str = ""):
         return JSONResponse({"results": []})
     like = f"%{q}%"
     rows = query(
-        "SELECT discord_id, username, game_username, pr FROM players "
-        "WHERE username LIKE ? OR game_username LIKE ? "
+        "SELECT discord_id, username, game_username, pr FROM vtx_players "
+        "WHERE username LIKE %s OR game_username LIKE %s "
         "ORDER BY pr DESC LIMIT 8",
         (like, like),
     )
@@ -1544,8 +1373,8 @@ async def search_page(request: Request):
     if q:
         like = f"%{q}%"
         results = query(
-            "SELECT discord_id, username, game_username, pr FROM players "
-            "WHERE username LIKE ? OR game_username LIKE ? "
+            "SELECT discord_id, username, game_username, pr FROM vtx_players "
+            "WHERE username LIKE %s OR game_username LIKE %s "
             "ORDER BY pr DESC LIMIT 50",
             (like, like),
         )
@@ -1592,7 +1421,7 @@ async def compare_page(request: Request):
     left = get_player_profile(p1) if p1 else None
     right = get_player_profile(p2) if p2 else None
     players = query(
-        "SELECT discord_id, username, game_username FROM players "
+        "SELECT discord_id, username, game_username FROM vtx_players "
         "ORDER BY username ASC"
     )
     return templates.TemplateResponse(

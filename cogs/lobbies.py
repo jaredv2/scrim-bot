@@ -41,7 +41,7 @@ class LobbiesCog(commands.Cog):
             return
 
         lobby_id = execute(
-            "INSERT INTO lobbies (event_id, name) VALUES (?, ?)",
+            "INSERT INTO vtx_lobbies (event_id, name) VALUES (%s, %s)",
             (event_id, name),
         )
 
@@ -72,7 +72,7 @@ class LobbiesCog(commands.Cog):
             return
 
         existing = query_one(
-            "SELECT * FROM lobby_players WHERE lobby_id = ? AND player_id = ?",
+            "SELECT * FROM vtx_lobby_players WHERE lobby_id = %s AND player_id = %s",
             (lobby_id, player.id),
         )
         if existing:
@@ -82,7 +82,7 @@ class LobbiesCog(commands.Cog):
             return
 
         execute(
-            "INSERT INTO lobby_players (lobby_id, player_id) VALUES (?, ?)",
+            "INSERT INTO vtx_lobby_players (lobby_id, player_id) VALUES (%s, %s)",
             (lobby_id, player.id),
         )
 
@@ -115,7 +115,7 @@ class LobbiesCog(commands.Cog):
             return
 
         execute(
-            "DELETE FROM lobby_players WHERE lobby_id = ? AND player_id = ?",
+            "DELETE FROM vtx_lobby_players WHERE lobby_id = %s AND player_id = %s",
             (lobby_id, player.id),
         )
 
@@ -204,7 +204,7 @@ class LobbiesCog(commands.Cog):
             return
 
         execute(
-            "UPDATE lobbies SET room_code = ? WHERE id = ?",
+            "UPDATE vtx_lobbies SET room_code = %s WHERE id = %s",
             (room_code, lobby_id),
         )
 
@@ -231,7 +231,7 @@ class LobbiesCog(commands.Cog):
             return
 
         execute(
-            "UPDATE lobbies SET status = 'closed' WHERE id = ?",
+            "UPDATE vtx_lobbies SET status = 'closed' WHERE id = %s",
             (lobby_id,),
         )
 
@@ -241,7 +241,7 @@ class LobbiesCog(commands.Cog):
 
     @commands.hybrid_command(
         name="split-lobbies",
-        description="Auto-split an event's registrations into lobbies (teams stay together)",
+        description="Auto-split an event's registrations into vtx_lobbies (teams stay together)",
     )
     @app_commands.describe(event_id="Event ID", force="Re-split even if lobbies already exist")
     async def split_lobbies(

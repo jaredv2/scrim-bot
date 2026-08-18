@@ -60,13 +60,13 @@ class RegistrationCog(commands.Cog):
             send_messages=True,
             reason="Registration opened",
         )
-        execute("UPDATE events SET status = 'registration' WHERE id = ?", (event_id,))
+        execute("UPDATE vtx_events SET status = 'registration' WHERE id = %s", (event_id,))
         await channel.send(f"**{ev['name']} Signups Opened**")
 
         view = RegisterView(event_id=event_id, team_size=ev["team_size"], qualification_enabled=bool(ev.get("qualification_enabled")))
         button_msg = await channel.send("Click below to register:", view=view)
         execute(
-            "UPDATE events SET register_button_message_id = ? WHERE id = ?",
+            "UPDATE vtx_events SET register_button_message_id = %s WHERE id = %s",
             (str(button_msg.id), event_id),
         )
 
@@ -123,7 +123,7 @@ class RegistrationCog(commands.Cog):
             reason="Registration closed",
         )
         execute(
-            "UPDATE events SET status = 'setup' WHERE id = ? AND status = 'registration'",
+            "UPDATE vtx_events SET status = 'setup' WHERE id = %s AND status = 'registration'",
             (event_id,),
         )
         regs = get_event_registrations(event_id)
@@ -167,13 +167,13 @@ class RegistrationCog(commands.Cog):
             send_messages=True,
             reason="Registration reopened",
         )
-        execute("UPDATE events SET status = 'registration' WHERE id = ?", (event_id,))
+        execute("UPDATE vtx_events SET status = 'registration' WHERE id = %s", (event_id,))
         await channel.send(f"**{ev['name']} Signups Reopened**")
 
         view = RegisterView(event_id=event_id, team_size=ev["team_size"], qualification_enabled=bool(ev.get("qualification_enabled")))
         button_msg = await channel.send("Click below to register:", view=view)
         execute(
-            "UPDATE events SET register_button_message_id = ? WHERE id = ?",
+            "UPDATE vtx_events SET register_button_message_id = %s WHERE id = %s",
             (str(button_msg.id), event_id),
         )
 
@@ -209,7 +209,7 @@ class RegistrationCog(commands.Cog):
             await ctx.send(embed=error("Event not found."))
             return
 
-        execute("UPDATE events SET status = ? WHERE id = ?", (status, event_id))
+        execute("UPDATE vtx_events SET status = %s WHERE id = %s", (status, event_id))
         log_bot_action(event_id, "event_status", f"Status → {status}", str(ctx.author.id))
         await ctx.send(embed=success(f"**{ev['name']}** status → `{status}`"))
 
@@ -275,8 +275,8 @@ class RegistrationCog(commands.Cog):
             await ctx.send(embed=error("Provide at least one setting to change."))
             return
 
-        sets = ", ".join(f"{k} = ?" for k in changes)
-        execute(f"UPDATE events SET {sets} WHERE id = ?", (*changes.values(), event_id))
+        sets = ", ".join(f"{k} = %s" for k in changes)
+        execute(f"UPDATE vtx_events SET {sets} WHERE id = %s", (*changes.values(), event_id))
         log_bot_action(event_id, "event_settings", str(changes), str(ctx.author.id))
 
         lines = [f"{k.replace('_', ' ').title()}: **{v}**" for k, v in changes.items()]
@@ -380,7 +380,7 @@ class RegistrationCog(commands.Cog):
             return
 
         reg = query_one(
-            "SELECT * FROM registrations WHERE event_id = ? AND discord_id = ? AND status = 'confirmed'",
+            "SELECT * FROM vtx_registrations WHERE event_id = %s AND discord_id = %s AND status = 'confirmed'",
             (event_id, str(leader.id)),
         )
         if not reg:
@@ -413,7 +413,7 @@ class RegistrationCog(commands.Cog):
         upsert_player(pid, player.display_name)
         team_members.append(pid)
         execute(
-            "UPDATE registrations SET team_members = ? WHERE id = ?",
+            "UPDATE vtx_registrations SET team_members = %s WHERE id = %s",
             (",".join(team_members), reg["id"]),
         )
         log_bot_action(event_id, "admin_assign_player", f"{player.name} → team of {leader.name}", str(ctx.author.id))
@@ -441,11 +441,11 @@ class RegistrationCog(commands.Cog):
 
         pid = str(player.id)
         reg = query_one(
-            "SELECT * FROM registrations WHERE event_id = ? AND discord_id = ? AND status = 'confirmed'",
+            "SELECT * FROM vtx_registrations WHERE event_id = %s AND discord_id = %s AND status = 'confirmed'",
             (event_id, pid),
         )
         if reg:
-            execute("DELETE FROM registrations WHERE id = ?", (reg["id"],))
+            execute("DELETE FROM vtx_registrations WHERE id = %s", (reg["id"],))
             log_bot_action(event_id, "admin_remove_team", f"Removed {player.name}'s team", str(ctx.author.id))
             await ctx.send(
                 embed=success(f"Removed {player.mention}'s whole team from **{ev['name']}**.")
@@ -453,7 +453,7 @@ class RegistrationCog(commands.Cog):
             return
 
         in_team = query_one(
-            "SELECT * FROM registrations WHERE event_id = ? AND team_members LIKE ? AND status = 'confirmed'",
+            "SELECT * FROM vtx_registrations WHERE event_id = %s AND team_members LIKE %s AND status = 'confirmed'",
             (event_id, f"%{pid}%"),
         )
         if not in_team:
@@ -477,14 +477,14 @@ class RegistrationCog(commands.Cog):
         self, ctx: commands.Context, new_ign: str
     ) -> None:
         discord_id = str(ctx.author.id)
-        player = query_one("SELECT * FROM players WHERE discord_id = ?", (discord_id,))
+        player = query_one("SELECT * FROM vtx_players WHERE discord_id = %s", (discord_id,))
         if not player:
             await ctx.send(embed=error("You are not registered in the system."))
             return
 
         old_ign = player["game_username"] or "Not set"
         execute(
-            "UPDATE players SET game_username = ? WHERE discord_id = ?",
+            "UPDATE vtx_players SET game_username = %s WHERE discord_id = %s",
             (new_ign.strip(), discord_id),
         )
         await ctx.send(
@@ -512,7 +512,7 @@ class RegistrationCog(commands.Cog):
         region: str | None = None,
     ) -> None:
         discord_id = str(ctx.author.id)
-        player = query_one("SELECT * FROM players WHERE discord_id = ?", (discord_id,))
+        player = query_one("SELECT * FROM vtx_players WHERE discord_id = %s", (discord_id,))
         if not player:
             await ctx.send(embed=error("You are not registered in the system."))
             return

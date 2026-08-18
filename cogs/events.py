@@ -253,7 +253,7 @@ class EventsCog(commands.Cog):
 
         if room_code.strip():
             execute(
-                "UPDATE events SET room_code = ? WHERE id = ?",
+                "UPDATE vtx_events SET room_code = %s WHERE id = %s",
                 (room_code.strip(), event_id),
             )
 
@@ -364,7 +364,7 @@ class EventsCog(commands.Cog):
             return
 
         execute(
-            "UPDATE events SET room_code = ?, status = 'in_progress' WHERE id = ?",
+            "UPDATE vtx_events SET room_code = %s, status = 'in_progress' WHERE id = %s",
             (room_code, event_id),
         )
 
@@ -383,7 +383,7 @@ class EventsCog(commands.Cog):
                 if reg.get("team_members"):
                     members = reg["team_members"].split(",")
                     current_team.extend([
-                        query_one("SELECT * FROM players WHERE discord_id = ?", (mid,))
+                        query_one("SELECT * FROM vtx_players WHERE discord_id = %s", (mid,))
                         for mid in members
                     ])
                 if len(current_team) >= team_size:
@@ -409,7 +409,7 @@ class EventsCog(commands.Cog):
                             await member.add_roles(role)
 
             execute(
-                "UPDATE events SET team_roles = ? WHERE id = ?",
+                "UPDATE vtx_events SET team_roles = %s WHERE id = %s",
                 (",".join(str(r) for r in team_roles), event_id),
             )
 
@@ -442,7 +442,7 @@ class EventsCog(commands.Cog):
         )
 
         execute(
-            "UPDATE events SET dispatch_channel_id = ? WHERE id = ?",
+            "UPDATE vtx_events SET dispatch_channel_id = %s WHERE id = %s",
             (str(temp_channel.id), event_id),
         )
 
@@ -484,7 +484,7 @@ class EventsCog(commands.Cog):
         rc = room_code.strip() or ev.get("room_code") or ""
 
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (event_id, game_number),
         )
         if not game:
@@ -492,20 +492,20 @@ class EventsCog(commands.Cog):
         else:
             game_id = game["id"]
             execute(
-                "UPDATE games SET status = 'in_progress', room_code = ?, "
-                "started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                "UPDATE vtx_games SET status = 'in_progress', room_code = %s, "
+                "started_at = CURRENT_TIMESTAMP WHERE id = %s",
                 (rc, game_id),
             )
 
         execute(
-            "UPDATE events SET status = 'in_progress', current_game = ? WHERE id = ?",
+            "UPDATE vtx_events SET status = 'in_progress', current_game = %s WHERE id = %s",
             (game_number, event_id),
         )
 
         players = get_event_players(event_id)
         for p in players:
             execute(
-                "INSERT OR IGNORE INTO game_players (game_id, player_id) VALUES (?, ?)",
+                "INSERT INTO vtx_game_players (game_id, player_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (game_id, p["id"]),
             )
 
@@ -593,7 +593,7 @@ class EventsCog(commands.Cog):
             return
 
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (event_id, game_number),
         )
         if not game:
@@ -601,7 +601,7 @@ class EventsCog(commands.Cog):
             return
 
         execute(
-            "UPDATE games SET status = 'completed', ended_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE vtx_games SET status = 'completed', ended_at = CURRENT_TIMESTAMP WHERE id = %s",
             (game["id"],),
         )
 
@@ -614,11 +614,11 @@ class EventsCog(commands.Cog):
             placements.append((str(third.id), 3, 15))
 
         for did, placement, pts in placements:
-            p = query_one("SELECT id FROM players WHERE discord_id = ?", (did,))
+            p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (did,))
             if p:
                 execute(
-                    "UPDATE game_players SET placement = ?, points = ? "
-                    "WHERE game_id = ? AND player_id = ?",
+                    "UPDATE vtx_game_players SET placement = %s, points = %s "
+                    "WHERE game_id = %s AND player_id = %s",
                     (placement, pts, game["id"], p["id"]),
                 )
 
@@ -724,7 +724,7 @@ class EventsCog(commands.Cog):
             await ctx.send(embed=error("Event not found."))
             return
 
-        execute("UPDATE events SET status = 'completed' WHERE id = ?", (event_id,))
+        execute("UPDATE vtx_events SET status = 'completed' WHERE id = %s", (event_id,))
 
         if ev.get("team_size", 1) >= 2:
             board = get_team_leaderboard(event_id)
@@ -913,7 +913,7 @@ class EventsCog(commands.Cog):
             return
 
         execute(
-            "UPDATE events SET room_code = ?, status = 'in_progress' WHERE id = ?",
+            "UPDATE vtx_events SET room_code = %s, status = 'in_progress' WHERE id = %s",
             (room_code, event_id),
         )
 
@@ -977,7 +977,7 @@ class EventsCog(commands.Cog):
             await ctx.send(embed=error("Event not found."))
             return
 
-        execute("UPDATE events SET status = 'completed' WHERE id = ?", (event_id,))
+        execute("UPDATE vtx_events SET status = 'completed' WHERE id = %s", (event_id,))
 
         if ev.get("team_size", 1) >= 2:
             board = get_team_leaderboard(event_id)
@@ -1095,7 +1095,7 @@ class EventsCog(commands.Cog):
             return
 
         execute(
-            "INSERT INTO command_queue (command, params) VALUES ('start_session', ?)",
+            "INSERT INTO vtx_command_queue (command, params) VALUES ('start_session', %s)",
             (
                 json.dumps(
                     {
@@ -1128,7 +1128,7 @@ class EventsCog(commands.Cog):
             return
 
         execute(
-            "INSERT INTO command_queue (command, params) VALUES ('end_session', ?)",
+            "INSERT INTO vtx_command_queue (command, params) VALUES ('end_session', %s)",
             (json.dumps({"event_id": event_id, "lobby_id": lobby_id}),),
         )
         scope = f" (lobby {lobby_id})" if lobby_id is not None else ""
@@ -1169,7 +1169,7 @@ class EventsCog(commands.Cog):
             if not member:
                 continue
             try:
-                p = query_one("SELECT pr FROM players WHERE discord_id = ?", (did,))
+                p = query_one("SELECT pr FROM vtx_players WHERE discord_id = %s", (did,))
                 await sync_rank_role(ctx.guild, member, (p["pr"] if p else 0) or 0)
             except Exception:
                 pass

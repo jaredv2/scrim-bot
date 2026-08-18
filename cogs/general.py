@@ -59,10 +59,10 @@ class RegisterModal(discord.ui.Modal, title="Register Player"):
         ign_val = self.ign.value.strip()
         gid_val = self.game_id.value.strip()
 
-        existing = query_one("SELECT * FROM players WHERE discord_id = ?", (discord_id,))
+        existing = query_one("SELECT * FROM vtx_players WHERE discord_id = %s", (discord_id,))
         if existing:
             execute(
-                "UPDATE players SET username = ?, game_username = ?, game_id = ? WHERE discord_id = ?",
+                "UPDATE vtx_players SET username = %s, game_username = %s, game_id = %s WHERE discord_id = %s",
                 (username, ign_val, gid_val, discord_id),
             )
             await interaction.response.send_message(
@@ -71,7 +71,7 @@ class RegisterModal(discord.ui.Modal, title="Register Player"):
         else:
             upsert_player(discord_id, username)
             execute(
-                "UPDATE players SET game_username = ?, game_id = ? WHERE discord_id = ?",
+                "UPDATE vtx_players SET game_username = %s, game_id = %s WHERE discord_id = %s",
                 (ign_val, gid_val, discord_id),
             )
             await interaction.response.send_message(
@@ -128,10 +128,10 @@ class GeneralCog(commands.Cog):
                 return
             username = user.display_name
 
-            existing = query_one("SELECT * FROM players WHERE discord_id = ?", (discord_id,))
+            existing = query_one("SELECT * FROM vtx_players WHERE discord_id = %s", (discord_id,))
             if existing:
                 execute(
-                    "UPDATE players SET username = ?, game_username = ?, game_id = ? WHERE discord_id = ?",
+                    "UPDATE vtx_players SET username = %s, game_username = %s, game_id = %s WHERE discord_id = %s",
                     (username, ign.strip(), game_id.strip(), discord_id),
                 )
                 await ctx.send(
@@ -140,7 +140,7 @@ class GeneralCog(commands.Cog):
             else:
                 upsert_player(discord_id, username)
                 execute(
-                    "UPDATE players SET game_username = ?, game_id = ? WHERE discord_id = ?",
+                    "UPDATE vtx_players SET game_username = %s, game_id = %s WHERE discord_id = %s",
                     (ign.strip(), game_id.strip(), discord_id),
                 )
                 await ctx.send(
@@ -380,11 +380,11 @@ class GeneralCog(commands.Cog):
     async def leaderboard(self, ctx: commands.Context, event_id: int | None = None) -> None:
         if event_id is None:
             evs = query(
-                "SELECT * FROM events WHERE status = 'in_progress' ORDER BY created_at DESC LIMIT 1"
+                "SELECT * FROM vtx_events WHERE status = 'in_progress' ORDER BY created_at DESC LIMIT 1"
             )
             if not evs:
                 evs = query(
-                    "SELECT * FROM events WHERE status IN ('setup', 'registration') "
+                    "SELECT * FROM vtx_events WHERE status IN ('setup', 'registration') "
                     "ORDER BY created_at DESC LIMIT 1"
                 )
             if not evs:
@@ -429,7 +429,7 @@ class GeneralCog(commands.Cog):
     @commands.hybrid_command(name="events", description="List all active events on the server")
     async def events_list(self, ctx: commands.Context) -> None:
         evs = query(
-            "SELECT * FROM events WHERE status IN ('setup', 'registration', 'in_progress') "
+            "SELECT * FROM vtx_events WHERE status IN ('setup', 'registration', 'in_progress') "
             "ORDER BY created_at DESC LIMIT 10"
         )
         if not evs:
@@ -441,7 +441,7 @@ class GeneralCog(commands.Cog):
         for ev in evs:
             team_label = {1: "Solo", 2: "Duo", 3: "Trio"}.get(ev["team_size"], "Solo")
             regs = query_one(
-                "SELECT COUNT(*) AS cnt FROM registrations WHERE event_id = ? AND status = 'confirmed'",
+                "SELECT COUNT(*) AS cnt FROM vtx_registrations WHERE event_id = %s AND status = 'confirmed'",
                 (ev["id"],),
             )
             count = regs["cnt"] if regs else 0
@@ -466,7 +466,7 @@ class GeneralCog(commands.Cog):
         current: str,
     ) -> list[app_commands.Choice]:
         events = query(
-            "SELECT id, name, created_at FROM events ORDER BY created_at DESC LIMIT 25"
+            "SELECT id, name, created_at FROM vtx_events ORDER BY created_at DESC LIMIT 25"
         )
         choices = []
         for ev in events:
@@ -956,7 +956,7 @@ class GeneralCog(commands.Cog):
             )
 
         active = query(
-            "SELECT * FROM events WHERE status IN ('registration', 'in_progress') "
+            "SELECT * FROM vtx_events WHERE status IN ('registration', 'in_progress') "
             "ORDER BY id DESC"
         )
         if active:

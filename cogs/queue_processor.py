@@ -103,7 +103,7 @@ class CommandQueueCog(commands.Cog):
             await channel.set_permissions(
                 guild.default_role, send_messages=True, reason="Dashboard: open registration"
             )
-            execute("UPDATE events SET status = 'registration' WHERE id = ?", (ev["id"],))
+            execute("UPDATE vtx_events SET status = 'registration' WHERE id = %s", (ev["id"],))
             log_bot_action(ev["id"], "open_registration", f"Opened in {channel.name}")
 
     async def _close_registration(self, guild: discord.Guild, params: dict) -> None:
@@ -116,7 +116,7 @@ class CommandQueueCog(commands.Cog):
                 guild.default_role, send_messages=False, reason="Dashboard: close registration"
             )
             execute(
-                "UPDATE events SET status = 'setup' WHERE id = ? AND status = 'registration'",
+                "UPDATE vtx_events SET status = 'setup' WHERE id = %s AND status = 'registration'",
                 (ev["id"],),
             )
             log_bot_action(ev["id"], "close_registration", f"Closed in {channel.name}")
@@ -130,7 +130,7 @@ class CommandQueueCog(commands.Cog):
             await channel.set_permissions(
                 guild.default_role, send_messages=True, reason="Dashboard: reopen registration"
             )
-            execute("UPDATE events SET status = 'registration' WHERE id = ?", (ev["id"],))
+            execute("UPDATE vtx_events SET status = 'registration' WHERE id = %s", (ev["id"],))
             log_bot_action(ev["id"], "reopen_registration", f"Reopened in {channel.name}")
 
     async def _dispatch(self, guild: discord.Guild, params: dict) -> None:
@@ -258,7 +258,7 @@ class CommandQueueCog(commands.Cog):
         await channel.send(text)
 
         from database import execute
-        execute("UPDATE events SET status = 'completed' WHERE id = ?", (ev["id"],))
+        execute("UPDATE vtx_events SET status = 'completed' WHERE id = %s", (ev["id"],))
 
     async def _dm_players(self, guild: discord.Guild, params: dict) -> None:
         ev = get_event(params["event_id"])
@@ -311,7 +311,7 @@ class CommandQueueCog(commands.Cog):
         room_code = params.get("room_code") or ev.get("room_code") or ""
 
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (ev["id"], game_number),
         )
         if not game:
@@ -319,20 +319,20 @@ class CommandQueueCog(commands.Cog):
         else:
             game_id = game["id"]
             execute(
-                "UPDATE games SET status = 'in_progress', "
-                "started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                "UPDATE vtx_games SET status = 'in_progress', "
+                "started_at = CURRENT_TIMESTAMP WHERE id = %s",
                 (game_id,),
             )
 
         execute(
-            "UPDATE events SET status = 'in_progress', current_game = ? WHERE id = ?",
+            "UPDATE vtx_events SET status = 'in_progress', current_game = %s WHERE id = %s",
             (game_number, ev["id"]),
         )
 
         players = get_event_players(ev["id"])
         for p in players:
             execute(
-                "INSERT OR IGNORE INTO game_players (game_id, player_id) VALUES (?, ?)",
+                "INSERT INTO vtx_game_players (game_id, player_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (game_id, p["id"]),
             )
 
@@ -345,24 +345,24 @@ class CommandQueueCog(commands.Cog):
 
         game_number = params["game_number"]
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (ev["id"], game_number),
         )
         if not game:
             return
 
         execute(
-            "UPDATE games SET status = 'completed', ended_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE vtx_games SET status = 'completed', ended_at = CURRENT_TIMESTAMP WHERE id = %s",
             (game["id"],),
         )
 
         placements = params.get("placements", {})
         for discord_id, data in placements.items():
-            p = query_one("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+            p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (discord_id,))
             if p:
                 execute(
-                    "UPDATE game_players SET placement = ?, points = ? "
-                    "WHERE game_id = ? AND player_id = ?",
+                    "UPDATE vtx_game_players SET placement = %s, points = %s "
+                    "WHERE game_id = %s AND player_id = %s",
                     (data["placement"], data["points"], game["id"], p["id"]),
                 )
 
@@ -373,9 +373,9 @@ class CommandQueueCog(commands.Cog):
 
         remaining = (ev.get("total_games") or 0) > 0 and game_number >= ev["total_games"]
         if remaining:
-            execute("UPDATE events SET status = 'completed' WHERE id = ?", (ev["id"],))
+            execute("UPDATE vtx_events SET status = 'completed' WHERE id = %s", (ev["id"],))
         else:
-            execute("UPDATE events SET status = 'setup' WHERE id = ?", (ev["id"],))
+            execute("UPDATE vtx_events SET status = 'setup' WHERE id = %s", (ev["id"],))
 
         await self._post_leaderboard_log(guild, ev)
 
@@ -400,7 +400,7 @@ class CommandQueueCog(commands.Cog):
 
         msg = await channel.send(embed=embed)
         execute(
-            "UPDATE events SET live_feed_message_id = ? WHERE id = ?",
+            "UPDATE vtx_events SET live_feed_message_id = %s WHERE id = %s",
             (str(msg.id), ev["id"]),
         )
 
@@ -426,19 +426,19 @@ class CommandQueueCog(commands.Cog):
         v_player = upsert_player(victim_id, v_member.display_name)
 
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND status = 'in_progress' "
+            "SELECT * FROM vtx_games WHERE event_id = %s AND status = 'in_progress' "
             "ORDER BY game_number DESC LIMIT 1",
             (ev["id"],),
         )
         if game:
             execute(
-                "INSERT INTO kills (game_id, killer_id, victim_id, weapon) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO vtx_kills (game_id, killer_id, victim_id, weapon) "
+                "VALUES (%s, %s, %s, %s)",
                 (game["id"], k_player["id"], v_player["id"], weapon or None),
             )
             execute(
-                "UPDATE game_players SET kills = kills + 1 "
-                "WHERE game_id = ? AND player_id = ?",
+                "UPDATE vtx_game_players SET kills = kills + 1 "
+                "WHERE game_id = %s AND player_id = %s",
                 (game["id"], k_player["id"]),
             )
 
@@ -511,18 +511,18 @@ class CommandQueueCog(commands.Cog):
         next_match = (session["current_match"] or 0) + 1
 
         execute(
-            "UPDATE sessions SET status = 'in_progress', room_code = ?, "
-            "started_at = COALESCE(started_at, CURRENT_TIMESTAMP) WHERE id = ?",
+            "UPDATE vtx_sessions SET status = 'in_progress', room_code = %s, "
+            "started_at = COALESCE(started_at, CURRENT_TIMESTAMP) WHERE id = %s",
             (room_code, sid),
         )
         execute(
-            "UPDATE events SET status = 'in_progress', current_game = ? WHERE id = ?",
+            "UPDATE vtx_events SET status = 'in_progress', current_game = %s WHERE id = %s",
             (next_match, ev["id"]),
         )
 
         game_number = (
             query_one(
-                "SELECT COALESCE(MAX(game_number), 0) AS n FROM games WHERE event_id = ?",
+                "SELECT COALESCE(MAX(game_number), 0) AS n FROM vtx_games WHERE event_id = %s",
                 (ev["id"],),
             )["n"]
             or 0
@@ -533,7 +533,7 @@ class CommandQueueCog(commands.Cog):
         register_match_players(game_id, ev["id"], lobby_id)
 
         execute(
-            "UPDATE sessions SET current_match = ? WHERE id = ?",
+            "UPDATE vtx_sessions SET current_match = %s WHERE id = %s",
             (next_match, sid),
         )
         log_bot_action(
@@ -575,25 +575,25 @@ class CommandQueueCog(commands.Cog):
 
         sid = session["id"]
         cur = query_one(
-            "SELECT * FROM games WHERE session_id = ? "
+            "SELECT * FROM vtx_games WHERE session_id = %s "
             "ORDER BY game_number DESC LIMIT 1",
             (sid,),
         )
         if cur and cur["status"] != "completed":
             execute(
-                "UPDATE games SET status = 'completed', "
-                "ended_at = CURRENT_TIMESTAMP WHERE id = ?",
+                "UPDATE vtx_games SET status = 'completed', "
+                "ended_at = CURRENT_TIMESTAMP WHERE id = %s",
                 (cur["id"],),
             )
             await self._post_game_results(guild, ev, cur)
 
         execute(
-            "UPDATE sessions SET status = 'completed', "
-            "ended_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE vtx_sessions SET status = 'completed', "
+            "ended_at = CURRENT_TIMESTAMP WHERE id = %s",
             (sid,),
         )
         execute(
-            "UPDATE events SET status = 'setup' WHERE id = ?",
+            "UPDATE vtx_events SET status = 'setup' WHERE id = %s",
             (ev["id"],),
         )
         log_bot_action(
@@ -650,15 +650,15 @@ class CommandQueueCog(commands.Cog):
 
         game_number = params["game_number"]
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (ev["id"], game_number),
         )
         if not game:
             return
 
         execute(
-            "UPDATE games SET status = 'completed', "
-            "ended_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE vtx_games SET status = 'completed', "
+            "ended_at = CURRENT_TIMESTAMP WHERE id = %s",
             (game["id"],),
         )
 
@@ -680,8 +680,8 @@ class CommandQueueCog(commands.Cog):
             )
             if params.get("end_session"):
                 execute(
-                    "UPDATE sessions SET status = 'completed', "
-                    "ended_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    "UPDATE vtx_sessions SET status = 'completed', "
+                    "ended_at = CURRENT_TIMESTAMP WHERE id = %s",
                     (session["id"],),
                 )
                 await self._post_session_leaderboard(guild, ev, session)
@@ -696,9 +696,9 @@ class CommandQueueCog(commands.Cog):
 
         remaining = (ev.get("total_games") or 0) > 0 and game_number >= ev["total_games"]
         if remaining:
-            execute("UPDATE events SET status = 'completed' WHERE id = ?", (ev["id"],))
+            execute("UPDATE vtx_events SET status = 'completed' WHERE id = %s", (ev["id"],))
         else:
-            execute("UPDATE events SET status = 'setup' WHERE id = ?", (ev["id"],))
+            execute("UPDATE vtx_events SET status = 'setup' WHERE id = %s", (ev["id"],))
         log_bot_action(ev["id"], "end_match", f"Game {game_number} ended")
 
         await self._post_leaderboard_log(guild, ev)
@@ -719,7 +719,7 @@ class CommandQueueCog(commands.Cog):
 
         game_number = (
             query_one(
-                "SELECT COALESCE(MAX(game_number), 0) AS n FROM games WHERE event_id = ?",
+                "SELECT COALESCE(MAX(game_number), 0) AS n FROM vtx_games WHERE event_id = %s",
                 (ev["id"],),
             )["n"]
             or 0
@@ -730,11 +730,11 @@ class CommandQueueCog(commands.Cog):
         register_match_players(game_id, ev["id"], session.get("lobby_id"))
 
         execute(
-            "UPDATE sessions SET current_match = ? WHERE id = ?",
+            "UPDATE vtx_sessions SET current_match = %s WHERE id = %s",
             (next_match, sid),
         )
         execute(
-            "UPDATE events SET status = 'in_progress', current_game = ? WHERE id = ?",
+            "UPDATE vtx_events SET status = 'in_progress', current_game = %s WHERE id = %s",
             (next_match, ev["id"]),
         )
         log_bot_action(
@@ -889,11 +889,11 @@ class CommandQueueCog(commands.Cog):
         if not ev:
             return
 
-        execute("UPDATE events SET status = 'completed' WHERE id = ?", (ev["id"],))
+        execute("UPDATE vtx_events SET status = 'completed' WHERE id = %s", (ev["id"],))
 
         pr_map = calc_event_pr(ev["id"])
         for did, pr_val in pr_map.items():
-            execute("UPDATE players SET pr = ? WHERE discord_id = ?", (pr_val, did))
+            execute("UPDATE vtx_players SET pr = %s WHERE discord_id = %s", (pr_val, did))
 
         from database import record_event_wins
 
@@ -959,7 +959,7 @@ class CommandQueueCog(commands.Cog):
             if not member:
                 continue
             try:
-                p = query_one("SELECT pr FROM players WHERE discord_id = ?", (did,))
+                p = query_one("SELECT pr FROM vtx_players WHERE discord_id = %s", (did,))
                 await sync_rank_role(guild, member, (p["pr"] if p else 0) or 0)
             except Exception:
                 pass
@@ -979,12 +979,12 @@ class CommandQueueCog(commands.Cog):
         reason = params.get("reason", "No reason given")
 
         reg = query_one(
-            "SELECT * FROM registrations WHERE event_id = ? AND discord_id = ?",
+            "SELECT * FROM vtx_registrations WHERE event_id = %s AND discord_id = %s",
             (ev["id"], discord_id),
         )
         if not reg:
             reg = query_one(
-                "SELECT * FROM registrations WHERE event_id = ? AND (discord_id = ? OR team_members LIKE ?)",
+                "SELECT * FROM vtx_registrations WHERE event_id = %s AND (discord_id = %s OR team_members LIKE %s)",
                 (ev["id"], discord_id, f"%{discord_id}%"),
             )
 

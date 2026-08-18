@@ -47,6 +47,7 @@ PIC_PERM_DURATIONS: dict[str, tuple[int, int]] = {
     "3m": (5, 180),
     "5m": (10, 300),
     "10m": (20, 600),
+    "1d": (5000, 86400),
 }
 
 PIC_PERMS_ROLE_NAME = "Pic Perms"
@@ -454,6 +455,7 @@ class InviteCoinsCog(commands.Cog):
                 "3m → **5 coins**\n"
                 "5m → **10 coins**\n"
                 "10m → **20 coins**\n"
+                "1d → **5000 coins**\n"
             ),
             inline=False,
         )
@@ -461,11 +463,11 @@ class InviteCoinsCog(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="pic-perms", description="Buy the Pic Perms role for a duration.")
-    @app_commands.describe(duration="30s, 1m, 3m, 5m or 10m")
+    @app_commands.describe(duration="30s, 1m, 3m, 5m, 10m or 1d")
     async def pic_perms(
         self,
         ctx: commands.Context,
-        duration: Literal["30s", "1m", "3m", "5m", "10m"],
+        duration: Literal["30s", "1m", "3m", "5m", "10m", "1d"],
     ) -> None:
         if ctx.guild is None:
             await ctx.send(embed=error("This command only works in a server."))

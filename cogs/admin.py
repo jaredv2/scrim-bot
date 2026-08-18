@@ -92,21 +92,21 @@ class AdminCog(commands.Cog):
             return
 
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (event_id, game_number),
         )
         if not game:
             await ctx.send(embed=error("Game not found."))
             return
 
-        p = query_one("SELECT id FROM players WHERE discord_id = ?", (str(player.id),))
+        p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (str(player.id),))
         if not p:
             await ctx.send(embed=error("Player not registered."))
             return
 
         execute(
-            "UPDATE game_players SET points = points + ? "
-            "WHERE game_id = ? AND player_id = ?",
+            "UPDATE vtx_game_players SET points = points + %s "
+            "WHERE game_id = %s AND player_id = %s",
             (points, game["id"], p["id"]),
         )
 
@@ -138,21 +138,21 @@ class AdminCog(commands.Cog):
             return
 
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (event_id, game_number),
         )
         if not game:
             await ctx.send(embed=error("Game not found."))
             return
 
-        p = query_one("SELECT id FROM players WHERE discord_id = ?", (str(player.id),))
+        p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (str(player.id),))
         if not p:
             await ctx.send(embed=error("Player not registered."))
             return
 
         execute(
-            "UPDATE game_players SET is_disqualified = 1, points = 0 "
-            "WHERE game_id = ? AND player_id = ?",
+            "UPDATE vtx_game_players SET is_disqualified = 1, points = 0 "
+            "WHERE game_id = %s AND player_id = %s",
             (game["id"], p["id"]),
         )
 
@@ -185,20 +185,20 @@ class AdminCog(commands.Cog):
             return
 
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (event_id, game_number),
         )
         if not game:
             await ctx.send(embed=error("Game not found."))
             return
 
-        p = query_one("SELECT id FROM players WHERE discord_id = ?", (str(player.id),))
+        p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (str(player.id),))
         if not p:
             await ctx.send(embed=error("Player not registered."))
             return
 
         execute(
-            "UPDATE game_players SET kills = ? WHERE game_id = ? AND player_id = ?",
+            "UPDATE vtx_game_players SET kills = %s WHERE game_id = %s AND player_id = %s",
             (kills, game["id"], p["id"]),
         )
 
@@ -217,7 +217,7 @@ class AdminCog(commands.Cog):
         self, ctx: commands.Context, event_id: int, game_number: int
     ) -> None:
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (event_id, game_number),
         )
         if not game:
@@ -346,7 +346,7 @@ class AdminCog(commands.Cog):
 
         for ev in events:
             game = query_one(
-                "SELECT * FROM games WHERE event_id = ? AND status = 'in_progress' "
+                "SELECT * FROM vtx_games WHERE event_id = %s AND status = 'in_progress' "
                 "ORDER BY game_number DESC LIMIT 1",
                 (ev["id"],),
             )
@@ -354,21 +354,21 @@ class AdminCog(commands.Cog):
                 continue
 
             killer = query_one(
-                "SELECT id FROM players WHERE username = ?", (killer_name,)
+                "SELECT id FROM vtx_players WHERE username = %s", (killer_name,)
             )
             victim = query_one(
-                "SELECT id FROM players WHERE username = ?", (victim_name,)
+                "SELECT id FROM vtx_players WHERE username = %s", (victim_name,)
             )
 
             if killer and victim:
                 execute(
-                    "INSERT INTO kills (game_id, killer_id, victim_id, weapon) "
-                    "VALUES (?, ?, ?, ?)",
+                    "INSERT INTO vtx_kills (game_id, killer_id, victim_id, weapon) "
+                    "VALUES (%s, %s, %s, %s)",
                     (game["id"], killer["id"], victim["id"], weapon),
                 )
                 execute(
-                    "UPDATE game_players SET kills = kills + 1 "
-                    "WHERE game_id = ? AND player_id = ?",
+                    "UPDATE vtx_game_players SET kills = kills + 1 "
+                    "WHERE game_id = %s AND player_id = %s",
                     (game["id"], killer["id"]),
                 )
                 try:
@@ -384,7 +384,7 @@ class AdminCog(commands.Cog):
     async def admin_events(self, interaction: discord.Interaction) -> None:
         if not await self._check_admin_interaction(interaction):
             return
-        events = query("SELECT * FROM events ORDER BY created_at DESC LIMIT 20")
+        events = query("SELECT * FROM vtx_events ORDER BY created_at DESC LIMIT 20")
         if not events:
             await interaction.response.send_message(
                 embed=base("📋 No events found."), ephemeral=True
@@ -428,7 +428,7 @@ class AdminCog(commands.Cog):
                 members = r["team_members"].split(",")
                 names = []
                 for mid in members:
-                    p = query_one("SELECT username FROM players WHERE discord_id = ?", (mid.strip(),))
+                    p = query_one("SELECT username FROM vtx_players WHERE discord_id = %s", (mid.strip(),))
                     names.append(p["username"] if p else mid)
                 team = f" → {' + '.join(names)}"
             lines.append(f"{i}. {r['username']} ({r['discord_id']}){team}")
@@ -546,18 +546,18 @@ class AdminCog(commands.Cog):
         if not await self._check_admin_interaction(interaction):
             return
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (event_id, game_number),
         )
         if not game:
             await interaction.response.send_message(embed=error("Game not found."), ephemeral=True)
             return
-        p = query_one("SELECT id FROM players WHERE discord_id = ?", (str(player.id),))
+        p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (str(player.id),))
         if not p:
             await interaction.response.send_message(embed=error("Player not registered."), ephemeral=True)
             return
         execute(
-            "UPDATE game_players SET points = points + ? WHERE game_id = ? AND player_id = ?",
+            "UPDATE vtx_game_players SET points = points + %s WHERE game_id = %s AND player_id = %s",
             (points, game["id"], p["id"]),
         )
         log_bot_action(event_id, "admin_add_points", f"+{points} pts to {player.name} in Game {game_number}", str(interaction.user.id))
@@ -584,18 +584,18 @@ class AdminCog(commands.Cog):
         if not await self._check_admin_interaction(interaction):
             return
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (event_id, game_number),
         )
         if not game:
             await interaction.response.send_message(embed=error("Game not found."), ephemeral=True)
             return
-        p = query_one("SELECT id FROM players WHERE discord_id = ?", (str(player.id),))
+        p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (str(player.id),))
         if not p:
             await interaction.response.send_message(embed=error("Player not registered."), ephemeral=True)
             return
         execute(
-            "UPDATE game_players SET kills = kills + ? WHERE game_id = ? AND player_id = ?",
+            "UPDATE vtx_game_players SET kills = kills + %s WHERE game_id = %s AND player_id = %s",
             (kills, game["id"], p["id"]),
         )
         log_bot_action(event_id, "admin_add_kill", f"+{kills} kills to {player.name} in Game {game_number}", str(interaction.user.id))
@@ -811,7 +811,7 @@ class AdminCog(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
 
-        players = query("SELECT discord_id, pr FROM players")
+        players = query("SELECT discord_id, pr FROM vtx_players")
         updated = 0
         for p in players:
             member = interaction.guild.get_member(int(p["discord_id"]))
@@ -1089,20 +1089,20 @@ class AdminCog(commands.Cog):
             await ctx.interaction.response.defer(ephemeral=True)
 
         game = query_one(
-            "SELECT * FROM games WHERE event_id = ? AND game_number = ?",
+            "SELECT * FROM vtx_games WHERE event_id = %s AND game_number = %s",
             (event_id, game_number),
         )
         if not game:
             await ctx.send(embed=error("Game not found."))
             return
 
-        p = query_one("SELECT id FROM players WHERE discord_id = ?", (str(player.id),))
+        p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (str(player.id),))
         if not p:
             await ctx.send(embed=error("Player not registered."))
             return
 
         gp = query_one(
-            "SELECT 1 FROM game_players WHERE game_id = ? AND player_id = ?",
+            "SELECT 1 FROM vtx_game_players WHERE game_id = %s AND player_id = %s",
             (game["id"], p["id"]),
         )
         if not gp:
@@ -1110,8 +1110,8 @@ class AdminCog(commands.Cog):
             return
 
         execute(
-            "UPDATE game_players SET is_disqualified = 0 "
-            "WHERE game_id = ? AND player_id = ?",
+            "UPDATE vtx_game_players SET is_disqualified = 0 "
+            "WHERE game_id = %s AND player_id = %s",
             (game["id"], p["id"]),
         )
 
@@ -1294,7 +1294,7 @@ def get_active_games_for_channel(channel_id: str) -> list[dict]:
     from database import query
 
     return query(
-        "SELECT * FROM events WHERE channel_id = ? AND status = 'in_progress'",
+        "SELECT * FROM vtx_events WHERE channel_id = %s AND status = 'in_progress'",
         (channel_id,),
     )
 

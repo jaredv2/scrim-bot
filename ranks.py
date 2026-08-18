@@ -27,7 +27,7 @@ def _rank_role_name(rank_name: str) -> str:
 
 def get_player_rank(discord_id: str) -> dict | None:
     player = query_one(
-        "SELECT pr FROM players WHERE discord_id = ?", (discord_id,)
+        "SELECT pr FROM vtx_players WHERE discord_id = %s", (discord_id,)
     )
     if not player:
         return None

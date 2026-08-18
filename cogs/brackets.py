@@ -69,7 +69,7 @@ class BracketsCog(commands.Cog):
             return
         if result.get("champion") is not None:
             p = query_one(
-                "SELECT COALESCE(game_username, username) AS name FROM players WHERE id = ?",
+                "SELECT COALESCE(game_username, username) AS name FROM vtx_players WHERE id = %s",
                 (result["champion"],),
             )
             await ctx.send(
@@ -181,12 +181,12 @@ class BracketsCog(commands.Cog):
 
         pr_map = calc_event_pr(event_id)
         for did, pr_val in pr_map.items():
-            execute("UPDATE players SET pr = ? WHERE discord_id = ?", (pr_val, did))
+            execute("UPDATE vtx_players SET pr = %s WHERE discord_id = %s", (pr_val, did))
         await self._sync_ranks(ctx, pr_map)
 
         if standings:
             winner_row = query_one(
-                "SELECT discord_id FROM players WHERE id = ?",
+                "SELECT discord_id FROM vtx_players WHERE id = %s",
                 (standings[0]["player_id"],),
             )
             if winner_row:
@@ -216,7 +216,7 @@ class BracketsCog(commands.Cog):
             if not member:
                 continue
             try:
-                p = query_one("SELECT pr FROM players WHERE discord_id = ?", (did,))
+                p = query_one("SELECT pr FROM vtx_players WHERE discord_id = %s", (did,))
                 await sync_rank_role(ctx.guild, member, (p["pr"] if p else 0) or 0)
             except Exception:
                 pass
