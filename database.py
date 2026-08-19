@@ -28,7 +28,22 @@ def _get_pool() -> pool.ThreadedConnectionPool:
     if not settings.supabase_db_url:
         raise RuntimeError("SUPABASE_DB_URL is not set in .env")
     if _conn_pool is None:
-        _conn_pool = pool.ThreadedConnectionPool(1, 10, settings.supabase_db_url)
+        last_exc: Exception | None = None
+        for attempt in range(5):
+            try:
+                _conn_pool = pool.ThreadedConnectionPool(
+                    1,
+                    10,
+                    settings.supabase_db_url,
+                    connect_timeout=15,
+                    keepalives=1,
+                )
+                break
+            except Exception as exc:  # transient pooler/network blips
+                last_exc = exc
+                time.sleep(2 * (attempt + 1))
+        if _conn_pool is None:
+            raise RuntimeError(f"Could not connect to Supabase: {last_exc}") from last_exc
     return _conn_pool
 
 
@@ -110,11 +125,23 @@ def get_db():
     try:
         yield conn
         conn.commit()
+    except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+        # The pooler may have dropped this connection; discard it so the pool
+        # creates a fresh one on the next request, then re-raise.
+        try:
+            pool_.putconn(conn, close=True)
+        except Exception:
+            pass
+        raise exc
     except Exception:
         conn.rollback()
         raise
     finally:
-        pool_.putconn(conn)
+        if not conn.closed:
+            try:
+                pool_.putconn(conn)
+            except Exception:
+                pass
 
 
 def _exec(conn, sql: str, params: tuple = ()):
@@ -732,6 +759,68 @@ def record_event_wins(event_id: int) -> None:
             "INSERT INTO vtx_event_wins (event_id, player_id, season) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
             (event_id, p["id"], season),
         )
+
+
+def _row_member_discord_ids(row: dict, team_size: int) -> list[str]:
+    """All discord ids represented by a leaderboard row (solo leader or whole team)."""
+    if team_size >= 2:
+        dids = [row["lead_id"]] if row.get("lead_id") else []
+        dids += [
+            m.strip()
+            for m in (row.get("team_members") or "").split(",")
+            if m.strip()
+        ]
+        return dids
+    return [row["discord_id"]] if row.get("discord_id") else []
+
+
+def grant_event_coin_rewards(event_id: int) -> None:
+    """Credit coins for a completed event: win, podium, and participation payouts.
+
+    Idempotent per event (guarded by a kv_store marker) so both finalize paths
+    can call it safely.
+    """
+    guard = f"event_coins_granted:{event_id}"
+    if get_kv(guard):
+        return
+    ev = get_event(event_id)
+    if not ev or ev.get("status") != "completed":
+        return
+
+    team_size = ev.get("team_size", 1)
+    if team_size >= 2:
+        board = get_team_leaderboard(event_id)
+    else:
+        board = get_leaderboard(event_id)
+
+    if not board:
+        return
+
+    podium = [
+        row for row in board[:3] if not row.get("is_dq")
+    ]
+    payouts = (
+        (0, settings.coin_event_win),
+        (1, settings.coin_placement_2),
+        (2, settings.coin_placement_3),
+    )
+    for idx, amount in payouts:
+        if idx >= len(podium):
+            break
+        for did in _row_member_discord_ids(podium[idx], team_size):
+            add_coins(did, amount)
+
+    part_rows = query(
+        "SELECT DISTINCT p.discord_id FROM vtx_game_players gp "
+        "JOIN vtx_players p ON p.id = gp.player_id "
+        "JOIN vtx_games g ON g.id = gp.game_id WHERE g.event_id = %s",
+        (event_id,),
+    )
+    for row in part_rows:
+        if row.get("discord_id"):
+            add_coins(row["discord_id"], settings.coin_participation)
+
+    set_kv(guard, "1")
 
 
 def get_player_stats(

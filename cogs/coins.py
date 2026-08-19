@@ -6,7 +6,7 @@ from typing import Literal
 
 import discord
 from config import digits_only, settings
-from discord import app_commands
+from discord import app_commands, ui
 from discord.ext import commands, tasks
 
 from database import (
@@ -54,6 +54,34 @@ PIC_PERMS_ROLE_NAME = "Pic Perms"
 MEDIA_LOUNGE_NAME = "📷｜showcase"
 MEDIA_LOUNGE_LEGACY_NAMES = ["media-lounge", "media", "showcase"]
 
+# duration_key -> (price_in_coins, seconds)
+COLOR_ROLE_DURATIONS: dict[str, tuple[int, int]] = {
+    "3d": (20, 3 * 86400),
+    "7d": (45, 7 * 86400),
+    "30d": (150, 30 * 86400),
+}
+
+VIP_ROLE_NAME = "VIP"
+# duration_key -> (price_in_coins, seconds)
+VIP_ROLE_DURATIONS: dict[str, tuple[int, int]] = {
+    "1d": (30, 86400),
+    "3d": (75, 3 * 86400),
+    "7d": (150, 7 * 86400),
+}
+
+PRESET_COLORS: dict[str, int] = {
+    "red": 0xE74C3C,
+    "orange": 0xE67E22,
+    "yellow": 0xF1C40F,
+    "green": 0x2ECC71,
+    "teal": 0x1ABC9C,
+    "blue": 0x3498DB,
+    "purple": 0x9B59B6,
+    "pink": 0xE91E63,
+    "white": 0xFFFFFF,
+    "black": 0x2C3E50,
+}
+
 # ---------------------------------------------------------------- quality score
 
 
@@ -76,6 +104,102 @@ def compute_quality_score(account_age_days: float, stay_days: float, msg_count: 
     return round(score, 1)
 
 
+class ColorPickView(ui.View):
+    """One-time color picker for the /color shop item."""
+
+    def __init__(self, author_id: int, price: int, seconds: int, label: str) -> None:
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.price = price
+        self.seconds = seconds
+        self.label = label
+        for name, hexv in PRESET_COLORS.items():
+            button = ui.Button(
+                label=name.capitalize(),
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"shopcolor_{name}",
+            )
+
+            async def _pick(
+                interaction: discord.Interaction,
+                color_name: str = name,
+                color_hex: int = hexv,
+            ) -> None:
+                await self._buy(interaction, color_name, color_hex)
+
+            button.callback = _pick
+            self.add_item(button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "This color picker belongs to someone else.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _buy(self, interaction: discord.Interaction, color_name: str, color_hex: int) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error("This only works in a server."), ephemeral=True
+            )
+            return
+        if not spend_coins(str(interaction.user.id), self.price):
+            await interaction.response.send_message(
+                embed=error(f"Not enough coins! **{self.label} color role** costs **{self.price}** 🪙."),
+                ephemeral=True,
+            )
+            return
+
+        role_name = f"{interaction.user.display_name}'s Colour"
+        role = discord.utils.get(interaction.guild.roles, name=role_name)
+        try:
+            if role is None:
+                role = await interaction.guild.create_role(
+                    name=role_name,
+                    colour=discord.Colour(color_hex),
+                    reason="Coin shop color role",
+                )
+            else:
+                await role.edit(colour=discord.Colour(color_hex))
+        except discord.Forbidden:
+            add_coins(str(interaction.user.id), self.price)
+            await interaction.response.send_message(
+                embed=error("Missing Manage Roles permission — purchase refunded."), ephemeral=True
+            )
+            return
+        try:
+            await interaction.user.add_roles(role, reason=f"Bought color role for {self.label}")
+        except discord.Forbidden:
+            add_coins(str(interaction.user.id), self.price)
+            await interaction.response.send_message(
+                embed=error("Missing Manage Roles permission — purchase refunded."), ephemeral=True
+            )
+            return
+
+        expires = _now_ts() + self.seconds
+        add_coin_purchase(
+            str(interaction.user.id),
+            f"color-{self.label}",
+            str(role.id),
+            expires,
+            str(interaction.guild.id),
+        )
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=f"🎨 Color picked: **{color_name}**",
+            view=self,
+        )
+        await interaction.followup.send(
+            embed=success(
+                f"🎨 **{color_name.capitalize()} colour role** granted for **{self.label}** "
+                f"(-{self.price} 🪙). It expires automatically."
+            ),
+            ephemeral=True,
+        )
+
+
 class InviteCoinsCog(commands.Cog):
     """Invite-coin tracking, anti-abuse pipeline, shop, and timed roles."""
 
@@ -96,6 +220,7 @@ class InviteCoinsCog(commands.Cog):
     async def _get_or_create_role(self, guild: discord.Guild, name: str, colour: discord.Colour) -> discord.Role | None:
         role_id_cfg = {
             PIC_PERMS_ROLE_NAME: settings.discord_shop_pic_role_id,
+            VIP_ROLE_NAME: settings.discord_vip_role_id,
         }.get(name)
         if role_id_cfg:
             role = guild.get_role(digits_only_to_int(role_id_cfg))
@@ -253,6 +378,12 @@ class InviteCoinsCog(commands.Cog):
                 if member and role and role in member.roles:
                     try:
                         await member.remove_roles(role, reason="Coin shop purchase expired")
+                    except discord.Forbidden:
+                        pass
+                # per-user color roles are deleted outright to avoid clutter
+                if (p.get("product") or "").startswith("color-") and role:
+                    try:
+                        await role.delete(reason="Coin shop color role expired")
                     except discord.Forbidden:
                         pass
             delete_purchase(p["id"])
@@ -459,7 +590,30 @@ class InviteCoinsCog(commands.Cog):
             ),
             inline=False,
         )
-        embed.set_footer(text="Earn coins by inviting friends. Buy with /pic-perms.")
+        color_prices = "\n".join(f"{k} → **{v} coins**" for k, v in COLOR_ROLE_DURATIONS.items())
+        embed.add_field(
+            name="🎨 Custom Color Role",
+            value=(
+                "Pick a color and wear it next to your name:\n"
+                f"{color_prices}\n"
+                "Buy with `/color`."
+            ),
+            inline=False,
+        )
+        vip_prices = "\n".join(f"{k} → **{v} coins**" for k, v in VIP_ROLE_DURATIONS.items())
+        embed.add_field(
+            name="💎 VIP Role",
+            value=(
+                f"Stand out with the **{VIP_ROLE_NAME}** role:\n"
+                f"{vip_prices}\n"
+                "Buy with `/vip`."
+            ),
+            inline=False,
+        )
+        embed.set_footer(
+            text="Earn coins by inviting friends, winning events, and participating. "
+            "Buy with /pic-perms, /color and /vip."
+        )
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="pic-perms", description="Buy the Pic Perms role for a duration.")
@@ -496,6 +650,65 @@ class InviteCoinsCog(commands.Cog):
             embed=success(
                 f"📸 **Pic Perms** granted for **{duration}** (-{price} 🪙). "
                 f"Images allowed {where}. It expires automatically."
+            )
+        )
+
+    @commands.hybrid_command(name="color", description="Buy a custom color role for a duration.")
+    @app_commands.describe(duration="3d, 7d or 30d")
+    async def color_role(
+        self,
+        ctx: commands.Context,
+        duration: Literal["3d", "7d", "30d"],
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.send(embed=error("This command only works in a server."))
+            return
+        if not ctx.guild.me.guild_permissions.manage_roles:
+            await ctx.send(
+                embed=error("The bot needs the **Manage Roles** permission to create color roles.")
+            )
+            return
+        price, seconds = COLOR_ROLE_DURATIONS[duration]
+        view = ColorPickView(ctx.author.id, price, seconds, duration)
+        embed = base("🎨 Custom Color Role", 0xF1C40F)
+        embed.description = f"Pick a color for **{duration}** (-{price} 🪙). It expires automatically."
+        await ctx.send(embed=embed, view=view)
+
+    @commands.hybrid_command(name="vip", description="Buy the VIP role for a duration.")
+    @app_commands.describe(duration="1d, 3d or 7d")
+    async def vip(
+        self,
+        ctx: commands.Context,
+        duration: Literal["1d", "3d", "7d"],
+    ) -> None:
+        if ctx.guild is None:
+            await ctx.send(embed=error("This command only works in a server."))
+            return
+        price, seconds = VIP_ROLE_DURATIONS[duration]
+        role = await self._get_or_create_role(ctx.guild, VIP_ROLE_NAME, discord.Colour.gold())
+        if role is None:
+            await ctx.send(
+                embed=error("The VIP role isn't set up — check bot permissions.")
+            )
+            return
+        if not spend_coins(str(ctx.author.id), price):
+            await ctx.send(
+                embed=error(f"Not enough coins! **{duration} VIP** costs **{price}** 🪙. Invite friends!")
+            )
+            return
+        try:
+            await ctx.author.add_roles(role, reason=f"Bought VIP for {duration}")
+        except discord.Forbidden:
+            add_coins(str(ctx.author.id), price)
+            await ctx.send(
+                embed=error("Missing Manage Roles permission — purchase refunded.")
+            )
+            return
+        expires = _now_ts() + seconds
+        add_coin_purchase(str(ctx.author.id), f"vip-{duration}", str(role.id), expires, str(ctx.guild.id))
+        await ctx.send(
+            embed=success(
+                f"💎 **VIP** role granted for **{duration}** (-{price} 🪙). It expires automatically."
             )
         )
 

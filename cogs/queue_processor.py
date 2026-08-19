@@ -899,6 +899,10 @@ class CommandQueueCog(commands.Cog):
 
         record_event_wins(ev["id"])
 
+        from database import grant_event_coin_rewards
+
+        grant_event_coin_rewards(ev["id"])
+
         team_size = ev.get("team_size", 1)
         if team_size >= 2:
             board = get_team_leaderboard(ev["id"])

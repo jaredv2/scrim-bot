@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     discord_media_lounge_channel_id: str = ""
     discord_lfg_channel_id: str = ""
     discord_crown_role_id: str = ""
+    discord_vip_role_id: str = ""
 
     # Invite-coin anti-abuse thresholds (all overridable via .env)
     # invite_min_stay_hours=0 pays invite rewards out instantly (no stay wait)
@@ -52,6 +53,21 @@ class Settings(BaseSettings):
     invite_suspicious_joins: int = 5
     invite_suspicious_window_hours: int = 24
     invite_suspicious_created_days: int = 7
+
+    # Coin rewards granted when an event is finalized (per player / team member).
+    coin_event_win: int = 5
+    coin_placement_2: int = 3
+    coin_placement_3: int = 1
+    coin_participation: int = 1
+
+    # Groq-powered AI chat (mention or reply to the bot). Off until GROQ_API_KEY is set.
+    groq_api_key: str = ""
+    ai_model: str = "llama-3.3-70b-versatile"
+    ai_max_tokens: int = 300
+    ai_context_messages: int = 6
+    ai_cooldown_seconds: int = 8
+    ai_blocked_words: str = ""
+
     discord_tournament_role_id: str = ""
     discord_scrim_role_id: str = ""
     discord_say_hi_user_id: str = ""

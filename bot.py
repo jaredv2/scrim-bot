@@ -175,6 +175,7 @@ class ScrimBot(commands.Bot):
             "cogs.coins",
             "cogs.lfg",
             "cogs.duels",
+            "cogs.ai",
             "views.registration",
         ]
         for cog_path in cogs:
