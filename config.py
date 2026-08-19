@@ -62,7 +62,7 @@ class Settings(BaseSettings):
 
     # Groq-powered AI chat (mention or reply to the bot). Off until GROQ_API_KEY is set.
     groq_api_key: str = ""
-    ai_model: str = "llama-3.3-70b-versatile"
+    ai_model: str = "groq/compound"
     ai_max_tokens: int = 300
     ai_context_messages: int = 6
     ai_cooldown_seconds: int = 8
