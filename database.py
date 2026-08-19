@@ -775,7 +775,8 @@ def _row_member_discord_ids(row: dict, team_size: int) -> list[str]:
 
 
 def grant_event_coin_rewards(event_id: int) -> None:
-    """Credit coins for a completed event: win, podium, and participation payouts.
+    """Credit coins for a completed event: per-kill, per-game-win, podium
+    placement, and participation payouts.
 
     Idempotent per event (guarded by a kv_store marker) so both finalize paths
     can call it safely.
@@ -788,28 +789,76 @@ def grant_event_coin_rewards(event_id: int) -> None:
         return
 
     team_size = ev.get("team_size", 1)
+
+    # 1) per-kill coins (individual stats, works for solo and team events)
+    kill_rows = query(
+        "SELECT p.discord_id, COALESCE(SUM(gp.kills), 0) AS kills "
+        "FROM vtx_game_players gp "
+        "JOIN vtx_players p ON p.id = gp.player_id "
+        "JOIN vtx_games g ON gp.game_id = g.id "
+        "WHERE g.event_id = %s GROUP BY p.discord_id",
+        (event_id,),
+    )
+    for row in kill_rows:
+        if row.get("discord_id") and row.get("kills"):
+            add_coins(row["discord_id"], row["kills"] * settings.coin_per_kill)
+
+    # 2) per-game-win coins
+    if team_size >= 2:
+        # every member of the winning team of a game gets the win payout
+        winning_teams = query(
+            "SELECT DISTINCT g.id AS game_id, tm.team_lead_id "
+            "FROM vtx_game_players gp "
+            "JOIN vtx_games g ON gp.game_id = g.id "
+            "JOIN vtx_players wp ON wp.id = gp.player_id "
+            "JOIN vtx_game_team_members tm "
+            "  ON tm.game_id = g.id AND tm.discord_id = wp.discord_id "
+            "WHERE g.event_id = %s AND gp.placement = 1",
+            (event_id,),
+        )
+        for wt in winning_teams:
+            members = query(
+                "SELECT discord_id FROM vtx_game_team_members "
+                "WHERE game_id = %s AND team_lead_id = %s",
+                (wt["game_id"], wt["team_lead_id"]),
+            )
+            for m in members:
+                if m.get("discord_id"):
+                    add_coins(m["discord_id"], settings.coin_per_game_win)
+    else:
+        solo_wins = query(
+            "SELECT p.discord_id, COUNT(*) AS wins "
+            "FROM vtx_game_players gp "
+            "JOIN vtx_players p ON p.id = gp.player_id "
+            "JOIN vtx_games g ON gp.game_id = g.id "
+            "WHERE g.event_id = %s AND gp.placement = 1 "
+            "GROUP BY p.discord_id",
+            (event_id,),
+        )
+        for row in solo_wins:
+            if row.get("discord_id") and row.get("wins"):
+                add_coins(row["discord_id"], row["wins"] * settings.coin_per_game_win)
+
+    # 3) podium placement payouts
     if team_size >= 2:
         board = get_team_leaderboard(event_id)
     else:
         board = get_leaderboard(event_id)
 
-    if not board:
-        return
+    if board:
+        podium = [row for row in board[:3] if not row.get("is_dq")]
+        payouts = (
+            (0, settings.coin_event_win),
+            (1, settings.coin_placement_2),
+            (2, settings.coin_placement_3),
+        )
+        for idx, amount in payouts:
+            if idx >= len(podium):
+                break
+            for did in _row_member_discord_ids(podium[idx], team_size):
+                add_coins(did, amount)
 
-    podium = [
-        row for row in board[:3] if not row.get("is_dq")
-    ]
-    payouts = (
-        (0, settings.coin_event_win),
-        (1, settings.coin_placement_2),
-        (2, settings.coin_placement_3),
-    )
-    for idx, amount in payouts:
-        if idx >= len(podium):
-            break
-        for did in _row_member_discord_ids(podium[idx], team_size):
-            add_coins(did, amount)
-
+    # 4) participation
     part_rows = query(
         "SELECT DISTINCT p.discord_id FROM vtx_game_players gp "
         "JOIN vtx_players p ON p.id = gp.player_id "

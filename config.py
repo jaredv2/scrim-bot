@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     invite_suspicious_created_days: int = 7
 
     # Coin rewards granted when an event is finalized (per player / team member).
+    coin_per_kill: int = 1
+    coin_per_game_win: int = 2
     coin_event_win: int = 5
     coin_placement_2: int = 3
     coin_placement_3: int = 1
