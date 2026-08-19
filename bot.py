@@ -221,6 +221,11 @@ class ScrimBot(commands.Bot):
     async def _on_app_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ) -> None:
+        if isinstance(error, app_commands.CommandNotFound):
+            logger.warning(
+                "unknown slash command attempted: %s", interaction.data.get("name")
+            )
+            return
         if isinstance(error, app_commands.TransformerError):
             msg = f"**Invalid argument type:** {error}"
         elif isinstance(error, app_commands.CommandInvokeError):
@@ -229,10 +234,14 @@ class ScrimBot(commands.Bot):
             msg = f"**Error:** {error}"
 
         embed = discord.Embed(description=msg, color=0xE74C3C)
-        if interaction.response.is_done():
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        else:
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+        except (discord.NotFound, discord.HTTPException):
+            # Interaction already expired (e.g. bot restarted mid-use) - nothing to do.
+            pass
 
     async def on_ready(self) -> None:
         logger.info("bot_ready", extra={"user": str(self.user)})

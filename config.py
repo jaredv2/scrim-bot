@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     ai_model: str = "groq/compound"
     ai_max_tokens: int = 300
     ai_context_messages: int = 6
+    ai_context_chars: int = 600
     ai_cooldown_seconds: int = 8
     ai_blocked_words: str = ""
 

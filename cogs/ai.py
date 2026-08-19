@@ -182,13 +182,22 @@ class AICog(commands.Cog):
             ]
         except Exception:
             history = []
+        budget = settings.ai_context_chars
+        used = 0
         for m in reversed(history):
             if m.author.bot:
-                messages.append({"role": "assistant", "content": m.content or ""})
+                role, body = "assistant", (m.content or "")
             else:
-                messages.append(
-                    {"role": "user", "content": f"{m.author.display_name}: {m.content}"}
-                )
+                role, body = "user", f"{m.author.display_name}: {m.content}"
+            body = body.strip()
+            if not body:
+                continue
+            if len(body) > 300:
+                body = body[:300] + "…"
+            if used + len(body) > budget:
+                break
+            messages.append({"role": role, "content": body})
+            used += len(body)
         messages.append({"role": "user", "content": content})
         return messages
 

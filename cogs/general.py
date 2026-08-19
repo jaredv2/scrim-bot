@@ -8,6 +8,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from embeds import base, error, success
+from config import settings
+from templates_fmt import role_ping
 from database import (
     count_event_players,
     execute,
@@ -105,6 +107,36 @@ class GeneralCog(commands.Cog):
         embed.add_field(name="Latency", value=f"{latency}ms", inline=True)
         embed.add_field(name="Uptime", value=self._get_uptime(), inline=True)
         await ctx.send(embed=embed)
+
+    @commands.hybrid_command(
+        name="create-scrim",
+        description="Post a scrim lobby ad with room code, format, region, team size and shoot timer",
+    )
+    @app_commands.describe(
+        code="Room code, e.g. OMNLK",
+        format="Event format, e.g. Zonewars",
+        region="Region, e.g. Eu",
+        team_size="Solo / Duo / Trio / Squad",
+        timer="Shoot timer as a string, e.g. 4:30",
+    )
+    async def create_scrim(
+        self,
+        ctx: commands.Context,
+        code: str,
+        format: str,
+        region: str,
+        team_size: str = "Solo",
+        timer: str = "0:00",
+    ) -> None:
+        team_size = team_size.capitalize()
+        text = (
+            f"Scrim {team_size}Format : {format}\n"
+            f"Region : {region}\n"
+            f"Code : {code}\n"
+            f"Shooting Timer : {timer}\n"
+            f"{role_ping(settings.discord_scrim_role_id)}"
+        )
+        await ctx.send(text)
 
     @commands.hybrid_command(
         name="register-player",
