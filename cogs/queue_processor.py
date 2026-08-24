@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -43,16 +44,16 @@ class CommandQueueCog(commands.Cog):
     async def process_queue(self) -> None:
         if reload_db_if_needed():
             logger.info("Database restored by dashboard — connections reloaded")
-        cmd = pop_command()
+        cmd = await asyncio.to_thread(pop_command)
         if not cmd:
             return
 
         try:
             params = json.loads(cmd["params"])
             await self._execute(cmd["command"], params)
-            complete_command(cmd["id"])
+            await asyncio.to_thread(complete_command, cmd["id"])
         except Exception as e:
-            fail_command(cmd["id"], str(e))
+            await asyncio.to_thread(fail_command, cmd["id"], str(e))
 
     async def _execute(self, command: str, params: dict) -> None:
         guild = self.bot.guilds[0] if self.bot.guilds else None
@@ -901,7 +902,7 @@ class CommandQueueCog(commands.Cog):
 
         from database import grant_event_coin_rewards
 
-        grant_event_coin_rewards(ev["id"])
+        await asyncio.to_thread(grant_event_coin_rewards, ev["id"])
 
         team_size = ev.get("team_size", 1)
         if team_size >= 2:

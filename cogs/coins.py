@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 from typing import Literal
@@ -370,7 +371,8 @@ class InviteCoinsCog(commands.Cog):
     @tasks.loop(seconds=60)
     async def expiry_loop(self) -> None:
         now = _now_ts()
-        for p in get_expired_purchases(now):
+        purchases = await asyncio.to_thread(get_expired_purchases, now)
+        for p in purchases:
             guild = self.bot.get_guild(int(p["guild_id"])) if p["guild_id"] else None
             if guild:
                 member = guild.get_member(int(p["discord_id"]))
@@ -386,14 +388,15 @@ class InviteCoinsCog(commands.Cog):
                         await role.delete(reason="Coin shop color role expired")
                     except discord.Forbidden:
                         pass
-            delete_purchase(p["id"])
+            await asyncio.to_thread(delete_purchase, p["id"])
 
     # ------------------------------------------------------- reward pipeline
 
     @tasks.loop(seconds=60)
     async def rewards_loop(self) -> None:
         now = _now_ts()
-        for reward in get_pending_rewards():
+        rewards = await asyncio.to_thread(get_pending_rewards)
+        for reward in rewards:
             try:
                 await self._process_reward(reward, now)
             except Exception:
@@ -404,22 +407,6 @@ class InviteCoinsCog(commands.Cog):
         if guild is None:
             return
         member = guild.get_member(int(reward["invited_user_id"]))
-        joined_at = reward["created_at"] or now
-        stay_seconds = (reward["left_at"] or now) - joined_at
-
-        # Max-age guard — never let a pending row linger forever.
-        if now - joined_at > settings.invite_max_pending_days * 86400:
-            await self._reject_reward(reward, "pending_too_long")
-            return
-
-        # 2) leave too early
-        if reward["left_at"] is not None and stay_seconds < settings.invite_min_stay_hours * 3600:
-            await self._reject_reward(reward, "left_early")
-            return
-
-        # 3) still waiting for the 24h stay.
-        if stay_seconds < settings.invite_min_stay_hours * 3600:
-            return
 
         account_age_days = -1.0
         if member is not None:
@@ -429,22 +416,53 @@ class InviteCoinsCog(commands.Cog):
             # fall back to a conservative 0 (will be rejected by the age gate).
             account_age_days = 0.0
 
-        # Account must be 7+ days old; while still in the server we can wait.
-        if member is not None and account_age_days < settings.invite_min_account_days:
+        # All DB reads/writes + decision logic run in a worker thread so the
+        # remote Postgres round-trips never block the Discord event loop.
+        decision = await asyncio.to_thread(
+            self._decide_reward, reward, now, account_age_days, member is None
+        )
+        action = decision["action"]
+        if action == "hold":
             return
-        if member is None and account_age_days < settings.invite_min_account_days:
-            await self._reject_reward(reward, "account_too_new")
-            return
+        if action == "reject":
+            await self._reject_reward(reward, decision["reason"])
+        elif action == "approve":
+            await self._approve_reward(reward, participated=decision["participated"], approved_at=now)
+
+    def _decide_reward(
+        self, reward: dict, now: int, account_age_days: float, member_absent: bool
+    ) -> dict:
+        """Synchronous invite-reward evaluation (DB only). Runs in a thread."""
+        joined_at = reward["created_at"] or now
+        stay_seconds = (reward["left_at"] or now) - joined_at
+
+        # Max-age guard — never let a pending row linger forever.
+        if now - joined_at > settings.invite_max_pending_days * 86400:
+            return {"action": "reject", "reason": "pending_too_long"}
+
+        # 2) leave too early
+        if reward["left_at"] is not None and stay_seconds < settings.invite_min_stay_hours * 3600:
+            return {"action": "reject", "reason": "left_early"}
+
+        # 3) still waiting for the stay.
+        if stay_seconds < settings.invite_min_stay_hours * 3600:
+            return {"action": "hold"}
+
+        # Account must be 7+ days old; members who already left can't prove age.
+        if member_absent:
+            return {"action": "reject", "reason": "account_too_new"}
+        if account_age_days < settings.invite_min_account_days:
+            return {"action": "hold"}
 
         # 4) rate limits — hold when the inviter's caps are spent.
         day_start = now - (now % 86400)
         week_start = now - 7 * 86400
         if count_approved_since(reward["inviter_id"], day_start) >= settings.invite_daily_limit:
             update_reward_quality(reward["id"], -1, "daily_rate_limit")
-            return
+            return {"action": "hold"}
         if count_approved_since(reward["inviter_id"], week_start) >= settings.invite_weekly_limit:
             update_reward_quality(reward["id"], -1, "weekly_rate_limit")
-            return
+            return {"action": "hold"}
 
         # 5) suspicion — many same-window invites or many fresh accounts.
         if not reward["flagged"]:
@@ -456,9 +474,9 @@ class InviteCoinsCog(commands.Cog):
                     if r["inviter_id"] == reward["inviter_id"] and r["flagged"] == 0:
                         flag_invite_reward(r["id"], "suspicious_volume")
                 log.warning("invite flag: inviter %s hit %d joins/%dh", reward["inviter_id"], window_joins, settings.invite_suspicious_window_hours)
-                return
+                return {"action": "hold"}
         if reward["flagged"]:
-            return  # paused until an admin reviews
+            return {"action": "hold"}  # paused until an admin reviews
 
         # 6) quality gate
         msg_count = get_user_message_count(reward["invited_user_id"])
@@ -472,22 +490,23 @@ class InviteCoinsCog(commands.Cog):
         update_reward_quality(reward["id"], score)
         approve_bar = settings.invite_score_approve
         if score >= approve_bar:
-            await self._approve_reward(reward, participated=part, approved_at=now)
-        elif score >= settings.invite_score_review:
+            return {"action": "approve", "participated": part}
+        if score >= settings.invite_score_review:
             # mid-quality: keep pending; auto-approve after the review window.
             auto_at = joined_at + max(settings.invite_loyalty_days, settings.invite_review_auto_days) * 86400
             if now >= auto_at:
-                await self._approve_reward(reward, participated=part, approved_at=now)
-            else:
-                update_reward_quality(reward["id"], score, "midscore_review")
-        else:
-            await self._reject_reward(reward, "quality_too_low")
+                return {"action": "approve", "participated": part}
+            update_reward_quality(reward["id"], score, "midscore_review")
+            return {"action": "hold"}
+        return {"action": "reject", "reason": "quality_too_low"}
 
     async def _approve_reward(self, reward: dict, participated: bool, approved_at: int) -> None:
         coins = settings.invite_reward_coins
         part_bonus = settings.invite_participation_bonus if participated else 0
-        approve_invite_reward(reward["id"], coins + part_bonus, reward["quality_score"] or 50, approved_at)
-        add_coins(reward["inviter_id"], coins + part_bonus)
+        await asyncio.to_thread(
+            approve_invite_reward, reward["id"], coins + part_bonus, reward["quality_score"] or 50, approved_at
+        )
+        await asyncio.to_thread(add_coins, reward["inviter_id"], coins + part_bonus)
         inviter = self._inviter(int(reward["guild_id"]), int(reward["inviter_id"]))
         if inviter:
             extra = " (incl. participation bonus)" if part_bonus else ""
@@ -501,7 +520,7 @@ class InviteCoinsCog(commands.Cog):
         log.info("invite reward %s approved (+%d coins)", reward["id"], coins + part_bonus)
 
     async def _reject_reward(self, reward: dict, reason: str) -> None:
-        set_reward_status(reward["id"], "rejected", reason)
+        await asyncio.to_thread(set_reward_status, reward["id"], "rejected", reason)
         if reason != "left_early":  # leave-early already DM'd
             inviter = self._inviter(int(reward["guild_id"]), int(reward["inviter_id"]))
             if inviter:
@@ -520,15 +539,18 @@ class InviteCoinsCog(commands.Cog):
     @tasks.loop(minutes=5)
     async def loyalty_loop(self) -> None:
         now = _now_ts()
-        for reward in get_approved_rewards_without_loyalty():
+        rewards = await asyncio.to_thread(get_approved_rewards_without_loyalty)
+        for reward in rewards:
             guild = self.bot.get_guild(int(reward["guild_id"])) if reward["guild_id"] else None
             member = guild.get_member(int(reward["invited_user_id"])) if guild else None
             if member is None:
                 continue
             # participation bonus if not yet granted and they played an event
-            if reward["participation_granted"] == 0 and has_event_participation(reward["invited_user_id"]):
-                add_coins(reward["inviter_id"], settings.invite_participation_bonus)
-                mark_participation_granted(reward["id"])
+            if reward["participation_granted"] == 0 and await asyncio.to_thread(
+                has_event_participation, reward["invited_user_id"]
+            ):
+                await asyncio.to_thread(add_coins, reward["inviter_id"], settings.invite_participation_bonus)
+                await asyncio.to_thread(mark_participation_granted, reward["id"])
                 inviter = guild.get_member(int(reward["inviter_id"]))
                 if inviter:
                     try:
@@ -541,8 +563,8 @@ class InviteCoinsCog(commands.Cog):
             approved_at = reward["approved_at"] or now
             if now - approved_at >= settings.invite_loyalty_days * 86400:
                 if member.joined_at and _now_ts() - int(member.joined_at.timestamp()) >= settings.invite_loyalty_days * 86400:
-                    add_coins(reward["inviter_id"], settings.invite_loyalty_bonus)
-                    mark_loyalty_granted(reward["id"])
+                    await asyncio.to_thread(add_coins, reward["inviter_id"], settings.invite_loyalty_bonus)
+                    await asyncio.to_thread(mark_loyalty_granted, reward["id"])
                     inviter = guild.get_member(int(reward["inviter_id"]))
                     if inviter:
                         try:

@@ -993,7 +993,9 @@ class EventsCog(commands.Cog):
 
         from database import grant_event_coin_rewards
 
-        grant_event_coin_rewards(event_id)
+        import asyncio
+
+        await asyncio.to_thread(grant_event_coin_rewards, event_id)
 
         channel = ctx.guild.get_channel(
             int(ev["dispatch_channel_id"] or ev["channel_id"] or 0)

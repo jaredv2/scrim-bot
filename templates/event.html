@@ -166,7 +166,7 @@
                         <div class="match-card">
                             <div class="match-info">
                                 <h3>Game {{ g.game_number }} <span class="status-badge status-{{ g.status }}">{{ g.status }}</span></h3>
-                                <span>Room: {{ g.room_code or 'N/A' }} | Started: {{ g.started_at[:16] if g.started_at else '-' }} | Ended: {{ g.ended_at[:16] if g.ended_at else '-' }}</span>
+                                <span>Room: {{ g.room_code or 'N/A' }} | Started: {{ g.started_at|fmt_dt }} | Ended: {{ g.ended_at|fmt_dt }}</span>
                             </div>
                             <span class="btn btn-primary btn-sm">View</span>
                         </div>
@@ -224,8 +224,8 @@
                             <td><a href="/event/{{ event.id }}/game/{{ g.game_number }}">Match {{ loop.index }} (Game {{ g.game_number }})</a></td>
                             <td><span class="status-badge status-{{ g.status }}">{{ g.status }}</span></td>
                             <td>{{ g.room_code or 'N/A' }}</td>
-                            <td>{{ g.started_at[:16] if g.started_at else '-' }}</td>
-                            <td>{{ g.ended_at[:16] if g.ended_at else '-' }}</td>
+                            <td>{{ g.started_at|fmt_dt }}</td>
+                            <td>{{ g.ended_at|fmt_dt }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>

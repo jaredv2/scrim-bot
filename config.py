@@ -77,6 +77,15 @@ class Settings(BaseSettings):
     dashboard_admin_password: str = ""
     dashboard_port: int = 8080
 
+    # Silent /health ping (keeps API warm / prevents idle sleep).
+    # api_health_url: full URL or path (e.g. "/health" or "http://localhost:8080/health").
+    #                defaults to http://127.0.0.1:{dashboard_port}/health when empty.
+    # health_ping_enabled: master switch for both cron and per-command pings.
+    api_health_url: str = ""
+    health_ping_enabled: bool = True
+    health_ping_interval_seconds: int = 300
+    health_ping_timeout_seconds: int = 5
+
     database_path: str = str(Path(__file__).parent / "data" / "scrim.db")
 
     # Supabase Postgres connection string (postgresql://user:pass@host:5432/db).

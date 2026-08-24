@@ -33,8 +33,8 @@
                 {% elif winner %}
                 <tr><td><strong>Winner</strong></td><td>🥇 {{ winner.username }}{% if winner_ign %} [{{ winner_ign }}]{% endif %}</td></tr>
                 {% endif %}
-                <tr><td><strong>Started</strong></td><td>{{ game.started_at[:19] if game.started_at else '-' }}</td></tr>
-                <tr><td><strong>Ended</strong></td><td>{{ game.ended_at[:19] if game.ended_at else '-' }}</td></tr>
+                <tr><td><strong>Started</strong></td><td>{{ game.started_at|fmt_dt(secs=True) }}</td></tr>
+                <tr><td><strong>Ended</strong></td><td>{{ game.ended_at|fmt_dt(secs=True) }}</td></tr>
             </table>
             {% if game.status != 'completed' %}
             <form method="post" action="/event/{{ event.id }}/end-match" style="margin-top:10px" onsubmit="return confirm('End this match and lock placements?')">
@@ -158,7 +158,7 @@
                         <td>{{ k.killer_name }}</td>
                         <td>{{ k.victim_name }}</td>
                         <td>{{ k.weapon or '-' }}</td>
-                        <td>{{ k.created_at[:19] }}</td>
+                        <td>{{ k.created_at|fmt_dt(secs=True) }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>

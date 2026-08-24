@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 
@@ -43,7 +44,7 @@ class HallOfFameCog(commands.Cog):
             if not channel:
                 continue
 
-            last_raw = get_kv(KV_LAST_POSTED, "")
+            last_raw = await asyncio.to_thread(get_kv, KV_LAST_POSTED, "")
             last = None
             if last_raw:
                 try:
@@ -58,7 +59,7 @@ class HallOfFameCog(commands.Cog):
 
             try:
                 await channel.send(embed=await self._hof_embed(guild))
-                set_kv(KV_LAST_POSTED, datetime.datetime.utcnow().isoformat())
+                await asyncio.to_thread(set_kv, KV_LAST_POSTED, datetime.datetime.utcnow().isoformat())
                 logger.info("hof_posted", extra={"channel": str(channel.id)})
             except Exception as e:
                 logger.error("hof_post_failed: %s", e, exc_info=True)
@@ -68,10 +69,10 @@ class HallOfFameCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _hof_embed(self, guild: discord.Guild) -> discord.Embed:
-        players = get_players_leaderboard()
+        players = await asyncio.to_thread(get_players_leaderboard)
         active = [p for p in players if (p.get("total_games") or 0) > 0]
 
-        embed = base(f"🏆 Hall of Fame — Season {get_season()}", 0xF1C40F)
+        embed = base(f"🏆 Hall of Fame — Season {await asyncio.to_thread(get_season)}", 0xF1C40F)
 
         legend = get_server_legend()
         if legend:

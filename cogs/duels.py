@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -365,7 +366,7 @@ class DuelsCog(commands.Cog):
     @tasks.loop(seconds=60)
     async def ttl_loop(self) -> None:
         try:
-            stale = get_stale_duel_asks()
+            stale = await asyncio.to_thread(get_stale_duel_asks)
         except Exception:
             logger.exception("duel ttl cleanup failed")
             return

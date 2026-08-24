@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -223,14 +224,15 @@ class ScheduleCog(commands.Cog):
         except Exception:
             return
         now = time.time()
-        upcoming = query(
+        upcoming = await asyncio.to_thread(
+            query,
             "SELECT * FROM vtx_events WHERE scheduled_at IS NOT NULL AND reminder_sent = 0",
         )
         for ev in upcoming:
             ts = int(ev["scheduled_at"])
             if now < ts - 3600 or now >= ts:
                 continue
-            for row in get_event_interested(ev["id"]):
+            for row in await asyncio.to_thread(get_event_interested, ev["id"]):
                 try:
                     member = self.bot.get_user(int(row["discord_id"]))
                     if member:
@@ -240,7 +242,7 @@ class ScheduleCog(commands.Cog):
                         )
                 except Exception:
                     continue
-            mark_event_reminded(ev["id"])
+            await asyncio.to_thread(mark_event_reminded, ev["id"])
 
 
 async def setup(bot: commands.Bot) -> None:

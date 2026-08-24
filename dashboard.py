@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import os
 import secrets
 import sqlite3
@@ -65,6 +66,19 @@ TEMPLATE_DIR.mkdir(exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+
+
+def _fmt_dt(value, secs: bool = False) -> str:
+    """Render a DB timestamp (datetime or str) as 'YYYY-MM-DD HH:MM[:SS]'."""
+    if value is None:
+        return "-"
+    if isinstance(value, datetime.datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S" if secs else "%Y-%m-%d %H:%M")
+    s = str(value)
+    return s[:19] if secs else s[:16]
+
+
+templates.env.filters["fmt_dt"] = _fmt_dt
 
 _dashboard_sessions: dict[str, dict] = {}
 MAX_SESSIONS = 100
