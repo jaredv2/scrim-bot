@@ -1,10 +1,36 @@
 from __future__ import annotations
 
+import logging
 import re
 
 import discord
 from discord import ui
 from discord.ext import commands
+
+logger = logging.getLogger("scrim-bot.registration")
+
+
+async def _safe_ephemeral(interaction: discord.Interaction, content: str | None = None, **kwargs) -> None:
+    """Send an ephemeral message without ever raising Unknown interaction (10062)."""
+    # kwargs may contain embed=, content=, etc.
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(content, ephemeral=True, **kwargs)
+        else:
+            await interaction.response.send_message(content, ephemeral=True, **kwargs)
+    except discord.NotFound:
+        # Interaction expired (>3s) or already acknowledged — try followup once
+        try:
+            await interaction.followup.send(content, ephemeral=True, **kwargs)
+        except Exception:
+            logger.debug("safe_ephemeral followup also failed (interaction expired)", exc_info=True)
+    except discord.InteractionResponded:
+        try:
+            await interaction.followup.send(content, ephemeral=True, **kwargs)
+        except Exception:
+            pass
+    except Exception:
+        logger.debug("safe_ephemeral failed", exc_info=True)
 
 from database import (
     check_event_entry,
@@ -178,11 +204,21 @@ class IGNModal(ui.Modal, title="In-Game Name"):
         if self.team_size >= 2 and self._skin_input:
             self.skin_result = self._skin_input.value.strip()
         discord_id = str(interaction.user.id)
-        execute(
-            "UPDATE vtx_players SET game_username = %s WHERE discord_id = %s",
-            (self.result, discord_id),
-        )
-        await interaction.response.defer()
+        try:
+            execute(
+                "UPDATE vtx_players SET game_username = %s WHERE discord_id = %s",
+                (self.result, discord_id),
+            )
+        except Exception:
+            logger.debug("IGNModal execute failed", exc_info=True)
+        try:
+            await interaction.response.defer()
+        except discord.NotFound:
+            logger.debug("IGNModal defer failed — interaction expired", exc_info=True)
+        except discord.InteractionResponded:
+            pass
+        except Exception:
+            logger.debug("IGNModal defer failed", exc_info=True)
 
 
 class RegisterView(ui.View):
@@ -200,29 +236,34 @@ class RegisterView(ui.View):
 
     @ui.button(label="Register", style=discord.ButtonStyle.green, custom_id="register_button")
     async def register(self, interaction: discord.Interaction, button: ui.Button) -> None:
-        if is_player_banned(str(interaction.user.id)):
-            await interaction.response.send_message(
-                "🚫 You are banned from registering.", ephemeral=True
-            )
-            return
-        ev = get_event(self.event_id)
-        if not ev:
-            await interaction.response.send_message("Event not found.", ephemeral=True)
-            return
-        if ev["status"] != "registration":
-            await interaction.response.send_message("Registration is not open.", ephemeral=True)
-            return
-        if not self._can_register(ev):
-            await interaction.response.send_message(
-                "🚫 **The event is full!** No more spots available.",
-                ephemeral=True,
-            )
-            return
+        try:
+            if is_player_banned(str(interaction.user.id)):
+                await _safe_ephemeral(interaction, "🚫 You are banned from registering.")
+                return
+            ev = get_event(self.event_id)
+            if not ev:
+                await _safe_ephemeral(interaction, "Event not found.")
+                return
+            if ev["status"] != "registration":
+                await _safe_ephemeral(interaction, "Registration is not open.")
+                return
+            if not self._can_register(ev):
+                await _safe_ephemeral(interaction, "🚫 **The event is full!** No more spots available.")
+                return
 
-        if self.team_size == 1:
-            await self._register_solo(interaction, ev)
-        else:
-            await self._hint_team_signup(interaction, ev)
+            if self.team_size == 1:
+                await self._register_solo(interaction, ev)
+            else:
+                await self._hint_team_signup(interaction, ev)
+        except discord.NotFound:
+            logger.debug("RegisterView.register: Unknown interaction (expired)", exc_info=True)
+        except Exception:
+            logger.exception("RegisterView.register failed")
+            # Try to inform user if we can
+            try:
+                await _safe_ephemeral(interaction, "⚠️ Something went wrong. Please try again.")
+            except Exception:
+                pass
 
     async def _hint_team_signup(self, interaction: discord.Interaction, ev: dict) -> None:
         """Team events use message-based signups — point the player at the format."""
@@ -230,13 +271,13 @@ class RegisterView(ui.View):
         channel = interaction.guild.get_channel(int(signup_channel_id)) if interaction.guild else None
         channel_hint = channel.mention if channel else "the signup channel"
         label = team_label(self.team_size)
-        await interaction.response.send_message(
+        await _safe_ephemeral(
+            interaction,
             f"📝 **{ev['name']}** is a **{label}** event — no buttons needed!\n"
             f"Go to {channel_hint} and type:\n"
             f"`{team_signup_format(self.team_size)}`\n"
             f"Start with your own mention, then your teammate(s), then the skin. "
             f"The bot registers all of you.",
-            ephemeral=True,
         )
 
     async def _register_solo(self, interaction: discord.Interaction, ev: dict) -> None:
@@ -245,9 +286,7 @@ class RegisterView(ui.View):
 
         entry = check_event_entry(ev["id"], discord_id)
         if not entry["ok"]:
-            await interaction.response.send_message(
-                f"🚫 {entry['reason']}", ephemeral=True
-            )
+            await _safe_ephemeral(interaction, f"🚫 {entry['reason']}")
             return
 
         existing = query_one(
@@ -255,9 +294,7 @@ class RegisterView(ui.View):
             (ev["id"], discord_id),
         )
         if existing and existing["status"] == "confirmed":
-            await interaction.response.send_message(
-                "You are already registered.", ephemeral=True
-            )
+            await _safe_ephemeral(interaction, "You are already registered.")
             return
 
         upsert_player(discord_id, username)
@@ -265,21 +302,42 @@ class RegisterView(ui.View):
 
         if not player or not player["game_username"]:
             modal = IGNModal(event_id=ev["id"])
-            await interaction.response.send_modal(modal)
+            try:
+                await interaction.response.send_modal(modal)
+            except discord.NotFound:
+                logger.debug("IGNModal send_modal failed — interaction expired", exc_info=True)
+                return
+            except discord.InteractionResponded:
+                # Already responded (e.g. deferred) — can't show modal
+                await _safe_ephemeral(interaction, "⚠️ Please try again — interaction timed out.")
+                return
             await modal.wait()
             ign = modal.result or username
-            await interaction.followup.send(
-                "⚠️ Changing your in-game name later will require running the `/change-ign` command.",
-                ephemeral=True,
-            )
+            try:
+                await interaction.followup.send(
+                    "⚠️ Changing your in-game name later will require running the `/change-ign` command.",
+                    ephemeral=True,
+                )
+            except Exception:
+                logger.debug("followup hint failed", exc_info=True)
         else:
             ign = player["game_username"]
-            await interaction.response.defer()
+            try:
+                await interaction.response.defer()
+            except discord.NotFound:
+                logger.debug("defer failed — interaction expired", exc_info=True)
+                # try followup defer fallback
+                try:
+                    await interaction.followup.send("Processing...", ephemeral=True)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
         if existing:
             execute(
                 "UPDATE vtx_registrations SET username = %s, team_members = NULL, "
-                "status = 'confirmed' WHERE id = ?",
+                "status = 'confirmed' WHERE id = %s",
                 (username, existing["id"]),
             )
         else:
@@ -292,26 +350,26 @@ class RegisterView(ui.View):
 
         regs = get_event_registrations(ev["id"])
         total_players = self._count_players(regs)
-        await interaction.followup.send(
-            f"✅ {interaction.user.mention} ({ign}) registered for **{ev['name']}** ({total_players} player{'s' if total_players != 1 else ''})",
-            ephemeral=False,
-        )
+        try:
+            await interaction.followup.send(
+                f"✅ {interaction.user.mention} ({ign}) registered for **{ev['name']}** ({total_players} player{'s' if total_players != 1 else ''})",
+                ephemeral=False,
+            )
+        except discord.NotFound:
+            logger.debug("followup confirm failed — interaction expired", exc_info=True)
+        except Exception:
+            logger.debug("followup confirm failed", exc_info=True)
 
     async def _ask_teammates(self, interaction: discord.Interaction, ev: dict) -> None:
         max_players = ev.get("max_players") or 0
         if max_players > 0 and count_event_players(ev["id"]) + (self.team_size - 1) > max_players:
-            await interaction.response.send_message(
-                "🚫 **The event is full!** No more spots available.",
-                ephemeral=True,
-            )
+            await _safe_ephemeral(interaction, "🚫 **The event is full!** No more spots available.")
             return
 
         signup_channel_id = ev["signup_channel_id"] or ev["channel_id"]
         channel = interaction.guild.get_channel(int(signup_channel_id))
         if not channel:
-            await interaction.response.send_message(
-                "Signup channel not found.", ephemeral=True
-            )
+            await _safe_ephemeral(interaction, "Signup channel not found.")
             return
 
         pending = query_one(
@@ -319,10 +377,7 @@ class RegisterView(ui.View):
             (ev["id"], str(interaction.user.id)),
         )
         if pending:
-            await interaction.response.send_message(
-                "You already have a pending registration. Reply to the bot's message above.",
-                ephemeral=True,
-            )
+            await _safe_ephemeral(interaction, "You already have a pending registration. Reply to the bot's message above.")
             return
 
         discord_id = str(interaction.user.id)
@@ -332,19 +387,36 @@ class RegisterView(ui.View):
 
         if not player or not player["game_username"]:
             modal = IGNModal(event_id=ev["id"], team_size=self.team_size)
-            await interaction.response.send_modal(modal)
+            try:
+                await interaction.response.send_modal(modal)
+            except discord.NotFound:
+                logger.debug("_ask_teammates modal send failed — interaction expired", exc_info=True)
+                return
+            except discord.InteractionResponded:
+                await _safe_ephemeral(interaction, "⚠️ Please try again — interaction timed out.")
+                return
             await modal.wait()
             ign = modal.result or username
             skin = modal.skin_result or "Default"
-            await interaction.followup.send(
-                "⚠️ Changing your in-game name later will require running the `/change-ign` command.",
-                ephemeral=True,
-            )
+            try:
+                await interaction.followup.send(
+                    "⚠️ Changing your in-game name later will require running the `/change-ign` command.",
+                    ephemeral=True,
+                )
+            except Exception:
+                logger.debug("followup hint failed", exc_info=True)
         else:
             ign = player["game_username"]
             skin_modal = IGNModal(event_id=ev["id"], team_size=self.team_size)
             skin_modal.ign.default = ign
-            await interaction.response.send_modal(skin_modal)
+            try:
+                await interaction.response.send_modal(skin_modal)
+            except discord.NotFound:
+                logger.debug("_ask_teammates skin modal send failed — interaction expired", exc_info=True)
+                return
+            except discord.InteractionResponded:
+                await _safe_ephemeral(interaction, "⚠️ Please try again — interaction timed out.")
+                return
             await skin_modal.wait()
             skin = skin_modal.skin_result or "Default"
 
