@@ -7,6 +7,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs, quote
 
 import psycopg2
 from psycopg2 import pool
@@ -44,6 +45,30 @@ def _safe_exc_str(exc: BaseException) -> str:
             return "unknown database error"
 
 
+def _parse_db_url(url: str) -> dict:
+    """Parse a postgresql:// URL into psycopg2 connect kwargs.
+    
+    Handles URL encoding of password and other components.
+    """
+    parsed = urlparse(url)
+    params = {
+        "host": parsed.hostname,
+        "port": parsed.port or 5432,
+        "database": parsed.path.lstrip("/") if parsed.path else "postgres",
+        "user": parsed.username,
+        "password": parsed.password,
+    }
+    # Parse query string for additional options
+    if parsed.query:
+        qs = parse_qs(parsed.query)
+        for k, v in qs.items():
+            if k == "sslmode":
+                params["sslmode"] = v[0]
+            elif k == "connect_timeout":
+                params["connect_timeout"] = int(v[0])
+    return params
+
+
 def _get_pool() -> pool.ThreadedConnectionPool:
     global _conn_pool, _pool_last_failure_ts, _pool_last_error
     if not settings.supabase_db_url:
@@ -59,15 +84,19 @@ def _get_pool() -> pool.ThreadedConnectionPool:
             f"Could not connect to Supabase (cooldown active, {_POOL_COOLDOWN_SECONDS - (now - _pool_last_failure_ts):.0f}s remaining): {safe_last}"
         ) from None
     try:
+        connect_kwargs = _parse_db_url(settings.supabase_db_url)
+        # Add pool-specific options
+        connect_kwargs.update({
+            "connect_timeout": 10,
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 3,
+        })
         _conn_pool = pool.ThreadedConnectionPool(
             1,
             10,
-            settings.supabase_db_url,
-            connect_timeout=10,
-            keepalives=1,
-            keepalives_idle=30,
-            keepalives_interval=10,
-            keepalives_count=3,
+            **connect_kwargs,
         )
         _pool_last_error = None
         return _conn_pool
