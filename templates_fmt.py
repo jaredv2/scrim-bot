@@ -18,14 +18,49 @@ _TIME_PATTERN = re.compile(
 
 
 def to_unix_ts(time_str: str | None) -> int | None:
-    """Parse '3:00 PM EST' / '13:00' / '3pm' into a UTC unix timestamp.
+    """Parse '3:00 PM EST' / '13:00' / '3pm' / '1787584200' / '2026-08-24 18:00 UTC' into a UTC unix timestamp.
 
-    Falls back to the next occurrence of that time of day. Returns None when
-    the string can't be parsed as a clock time.
+    - Raw unix timestamp (9-10 digits) is returned directly.
+    - ISO-like 'YYYY-MM-DD HH:MM' with optional TZ is parsed.
+    - Clock time '3:00 PM EST' falls back to next occurrence.
+    Returns None when unparsable.
     """
     if not time_str:
         return None
-    m = _TIME_PATTERN.match(time_str.strip())
+    s = time_str.strip()
+    if not s or s.lower() == "tbd":
+        return None
+    # Raw unix timestamp: e.g. "1787584200" or "<t:1787584200:R>"
+    cleaned = re.sub(r"[^\d]", "", s) if s.startswith("<t:") else s
+    if s.startswith("<t:"):
+        m = re.search(r"<t:(\d{9,10})", s)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                pass
+    if s.isdigit() and len(s) >= 9:
+        try:
+            return int(s)
+        except ValueError:
+            pass
+    # Try ISO datetime: YYYY-MM-DD [HH:MM[:SS]] [TZ]
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
+        try:
+            # split off trailing TZ word if present
+            parts = s.rsplit(" ", 1)
+            tz_candidate = parts[-1].lower() if len(parts) == 2 else ""
+            dt_str = s
+            offset = 0
+            if tz_candidate in TIME_TZ_OFFSETS:
+                dt_str = parts[0]
+                offset = TIME_TZ_OFFSETS[tz_candidate]
+            dt = datetime.strptime(dt_str.strip(), fmt)
+            dt = dt.replace(tzinfo=timezone.utc) - timedelta(hours=offset)
+            return int(dt.timestamp())
+        except ValueError:
+            continue
+    m = _TIME_PATTERN.match(s)
     if not m:
         return None
     hour = int(m.group("h"))
@@ -194,10 +229,11 @@ def dm_message(
     start_time: str,
     room_code: str,
     game_number: int = 1,
-    shoot_timer: int = 0,
+    shoot_timer: str = "",
     placement_scale: str = "",
 ) -> str:
-    timer_line = f"\n⏱️ **Shoot Timer:** {shoot_timer}s\n" if (shoot_timer or 0) > 0 else ""
+    st = (shoot_timer or "").strip()
+    timer_line = f"\n⏱️ **Shoot Timer:** {st}\n" if st and st != "0" else ""
     start_stamp = dynamic_time(start_time, "F")
     start_rel = dynamic_time(start_time, "R")
     scale_line = f"\nPlacement points: {placement_scale}\n" if placement_scale else ""

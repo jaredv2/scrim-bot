@@ -33,7 +33,7 @@ ACTIVITY_TYPES = {
 }
 
 COMMAND_SYNTAX = {
-    "create-event": "`;create-event <name> <#channel> <#signup_channel> [type] [entry_mode] [pr_cap] [division] [scoring_mode] [region] [format] [start_time] [team_size] [total_games] [max_players] [point_kill] [point_win] [dispatch] [room_code]`",
+    "create-event": "`;create-event <name> <#channel> <#signup_channel> [type] [entry_mode] [pr_cap] [division] [scoring_mode] [region] [format] [team_size] [total_games] [max_players] [point_kill] [point_win] [shoot_timer:string] [dispatch] [room_code] [start_time]` — shoot_timer as string (e.g. '02:30'), start_time as '2026-08-24 18:00 UTC' or unix '1787584200' → <t:1787584200:R>",
     "start-event": "`;start-event <event_id> <room_code>`",
     "start-scrim": "`;start-scrim <event_id> <room_code>`",
     "start-game": "`;start-game <event_id> <game_number> [room_code]`",

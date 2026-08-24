@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS vtx_events (
     coins_enabled INTEGER DEFAULT 0,
     qualifier_requirements TEXT,
     pr_multiplier REAL,
-    shoot_timer INTEGER DEFAULT 0,
+    shoot_timer TEXT DEFAULT '0',
     scheduled_at INTEGER,
     schedule_message_id TEXT,
     schedule_channel_id TEXT,

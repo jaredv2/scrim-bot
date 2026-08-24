@@ -567,6 +567,16 @@ async def create_event(request: Request, user: dict = Depends(get_current_user))
         )
         required_division_id = match["id"] if match else None
 
+    # New fields: start_time (stored as scheduled_at unix) and shoot_timer (string)
+    start_time_raw = _str_field("start_time", "TBD")
+    shoot_timer_raw = _str_field("shoot_timer", "0") or _str_field("shoot_timer_str", "0")
+    shoot_timer_raw = shoot_timer_raw.strip() or "0"
+    from templates_fmt import to_unix_ts
+
+    scheduled_at_val = None
+    if start_time_raw and start_time_raw.lower() != "tbd":
+        scheduled_at_val = to_unix_ts(start_time_raw)
+
     event_id = create_event_record(
         name=name,
         status="setup",
@@ -589,6 +599,8 @@ async def create_event(request: Request, user: dict = Depends(get_current_user))
         scoring_mode=scoring_mode,
         awards_pr=0 if coins_cup else (1 if form.get("awards_pr") == "1" else 0),
         coins_enabled=1 if coins_cup else 0,
+        shoot_timer=shoot_timer_raw,
+        scheduled_at=scheduled_at_val,
     )
     if _is_ajax(request):
         return JSONResponse({"ok": True, "event_id": event_id})

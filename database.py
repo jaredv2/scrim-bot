@@ -121,6 +121,11 @@ def init_db() -> None:
         try:
             with get_db() as conn:
                 _exec(conn, _SCHEMA_FILE.read_text(encoding="utf-8"))
+                # Migrate shoot_timer INTEGER → TEXT for existing DBs (string timers like "02:30" or "5m")
+                try:
+                    _exec(conn, "ALTER TABLE vtx_events ALTER COLUMN shoot_timer TYPE TEXT USING shoot_timer::TEXT")
+                except Exception:
+                    pass  # already TEXT or table not yet created / no permission; safe to ignore
         except Exception as exc:
             logger_db.warning("init_db skipped — DB unavailable, health will remain up: %s", exc)
             # Do NOT raise — allow dashboard/bot to start without DB

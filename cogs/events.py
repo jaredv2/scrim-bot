@@ -10,9 +10,11 @@ from embeds import base, error, success
 from templates_fmt import (
     cup_announcement,
     dm_message,
+    dynamic_time,
     end_tournament,
     role_ping,
     team_size_label,
+    to_unix_ts,
 )
 
 from database import (
@@ -66,9 +68,10 @@ class EventsCog(commands.Cog):
         placement_scale="Placement points (comma-separated, e.g. 10,8,6,4,2,1)",
         qualification="Enable the qualified-players system (players can qualify, move to other events without re-registering)",
         pr_multiplier="PR multiplier override (0 = auto based on player count)",
-        shoot_timer="Shoot timer in seconds (0 = none), shown in game DMs",
+        shoot_timer="Shoot timer as string (e.g. '02:30', '5m', '0' = none), shown in game DMs",
         dispatch="Post a dispatch message (with room code) immediately after creation",
         room_code="Room code used when dispatch is enabled",
+        start_time="Start time (e.g. '2026-08-24 18:00 UTC' or unix '1787584200') — shown as <t:...:R>",
     )
     @app_commands.rename(event_type="type")
     @app_commands.choices(
@@ -125,9 +128,10 @@ class EventsCog(commands.Cog):
         placement_scale: str = "10,8,6,4,2,1",
         qualification: bool = False,
         pr_multiplier: float = 0.0,
-        shoot_timer: int = 0,
+        shoot_timer: str = "0",
         dispatch: bool = False,
         room_code: str = "",
+        start_time: str = "TBD",
     ) -> None:
         if not await self._check_admin(ctx):
             return
@@ -215,6 +219,15 @@ class EventsCog(commands.Cog):
             [int(x.strip()) for x in placement_scale.split(",") if x.strip()]
         )
 
+        # start_time → scheduled_at (unix) + discord relative tag
+        raw_start = (start_time or "TBD").strip() or "TBD"
+        scheduled_at_val = None
+        if raw_start.lower() != "tbd":
+            scheduled_at_val = to_unix_ts(raw_start)
+            # if parsing failed but raw looks like unix, keep raw for display
+            # cup_announcement will handle fallback to raw string
+        shoot_timer_str = (shoot_timer or "0").strip() or "0"
+
         event_id = create_event_record(
             name=name,
             status="setup",
@@ -230,8 +243,8 @@ class EventsCog(commands.Cog):
             placement_scale=ps_json,
             qualification_enabled=1 if qualification else 0,
             pr_multiplier=pr_multiplier if pr_multiplier > 0 else None,
-            shoot_timer=shoot_timer if shoot_timer > 0 else 0,
-            scheduled_at=None,
+            shoot_timer=shoot_timer_str,
+            scheduled_at=scheduled_at_val,
             event_type=event_type,
             entry_mode=entry_mode,
             pr_cap=pr_cap if pr_cap > 0 else None,
@@ -265,11 +278,13 @@ class EventsCog(commands.Cog):
 
         if event_type != "scrim":
             team_label = team_size_label(team_size)
+            # Use provided start_time so announcement shows <t:unix:R> relative tag
+            announce_start = raw_start if raw_start.lower() != "tbd" else "TBD"
             text = cup_announcement(
                 name=name,
                 format_label=team_label,
                 region="EU",
-                start_time="TBD",
+                start_time=announce_start,
                 point_kill=point_kill,
                 point_win=point_win,
                 ping_role=role_ping(settings.discord_tournament_role_id),
@@ -298,6 +313,11 @@ class EventsCog(commands.Cog):
                 )
             )
 
+        # Build relative timestamp for the success message if start_time was given
+        start_display = raw_start
+        if scheduled_at_val:
+            start_display = f"{raw_start} (<t:{scheduled_at_val}:R>)"
+        shoot_display = shoot_timer_str if shoot_timer_str and shoot_timer_str != "0" else ""
         await ctx.send(
             embed=success(
                 f"Event **{name}** created (ID: {event_id}).\n"
@@ -306,8 +326,9 @@ class EventsCog(commands.Cog):
                 + qualifier_note
                 + f"\nAnnouncement in {channel.mention}\n"
                 f"Registrations in {signup_channel.mention}"
+                + (f"\nStart: **{start_display}**" if raw_start.lower() != "tbd" else "")
                 + (f"\nPR multiplier: **{pr_multiplier}x**" if pr_multiplier > 0 else "")
-                + (f"\nShoot timer: **{shoot_timer}s**" if shoot_timer > 0 else "")
+                + (f"\nShoot timer: **{shoot_display}**" if shoot_display else "")
                 + (
                     f"\nDispatch posted in {channel.mention}"
                     if dispatch
@@ -518,11 +539,13 @@ class EventsCog(commands.Cog):
             try:
                 member = ctx.guild.get_member(int(reg["discord_id"]))
                 if member:
+                    _st = str(ev.get('shoot_timer') or "").strip()
+                    _st_display = _st if _st and _st != "0" else ""
                     dm_text = (
                         f"🎮 **{ev['name']}** — Game {game_number}\n"
                         f"Room Code: **{rc}**\n"
                         f"Format: {team_label} | {ev.get('region', 'EU')}"
-                        + (f"\n⏱️ Shoot Timer: **{ev.get('shoot_timer') or 0}s**" if (ev.get('shoot_timer') or 0) > 0 else "")
+                        + (f"\n⏱️ Shoot Timer: **{_st_display}**" if _st_display else "")
                     )
                     await member.send(dm_text)
                     sent += 1
@@ -538,8 +561,9 @@ class EventsCog(commands.Cog):
             embed = base(f"🏁 Game {game_number} Started", 0xF39C12)
             embed.description = f"**{ev['name']}** — Game {game_number}"
             embed.add_field(name="Room Code", value=rc)
-            if (ev.get("shoot_timer") or 0) > 0:
-                embed.add_field(name="Shoot Timer", value=f"{ev['shoot_timer']}s")
+            _st2 = str(ev.get("shoot_timer") or "").strip()
+            if _st2 and _st2 != "0":
+                embed.add_field(name="Shoot Timer", value=_st2)
             if ev.get("scheduled_at"):
                 embed.add_field(
                     name="Scheduled",
