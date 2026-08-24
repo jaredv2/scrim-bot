@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
+import logging
 import os
 import secrets
 import sqlite3
@@ -15,6 +17,8 @@ from fastapi.templating import Jinja2Templates
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import settings
+
+logger = logging.getLogger("scrim-dashboard")
 
 from database import (
     add_event_qualifier,
@@ -135,11 +139,18 @@ def _parse_duration(duration: str):
 
 @app.on_event("startup")
 async def startup() -> None:
-    init_db()
+    # Never block startup on DB — health must stay 200 even if Supabase is in
+    # ECIRCUITBREAKER / auth-flood cooldown. init_db itself now swallows DB
+    # errors and logs a warning.
+    try:
+        await asyncio.to_thread(init_db)
+    except Exception as exc:  # defensive: init_db should already swallow
+        logger.warning("dashboard startup init_db failed (health will remain up): %s", exc)
 
 
 @app.api_route("/health", methods=["GET", "POST", "HEAD", "OPTIONS"])
 async def health():
+    # Always 200 — platform health checks must pass even when DB is down.
     return {"status": "ok"}
 
 

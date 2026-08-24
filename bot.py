@@ -140,7 +140,10 @@ class ScrimBot(commands.Bot):
         )
 
     async def setup_hook(self) -> None:
-        init_db()
+        try:
+            await asyncio.to_thread(init_db)
+        except Exception as exc:
+            logger.warning("bot init_db failed (bot will start, DB queries will retry later): %s", exc)
         await self.load_cogs()
         self.tree.error(self._on_app_command_error)
         self.activity_loop = self.loop.create_task(self._rotate_activity())

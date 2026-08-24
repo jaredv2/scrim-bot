@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -21,30 +22,44 @@ INIT_LOCK = threading.Lock()
 RESTART_FLAG_PREFIX = "."
 
 _conn_pool: pool.ThreadedConnectionPool | None = None
+_pool_last_failure_ts: float = 0.0
+_pool_last_error: str | None = None
+_POOL_COOLDOWN_SECONDS: float = 60.0
+
+logger_db = logging.getLogger("scrim-bot.db")
 
 
 def _get_pool() -> pool.ThreadedConnectionPool:
-    global _conn_pool
+    global _conn_pool, _pool_last_failure_ts, _pool_last_error
     if not settings.supabase_db_url:
         raise RuntimeError("SUPABASE_DB_URL is not set in .env")
-    if _conn_pool is None:
-        last_exc: Exception | None = None
-        for attempt in range(5):
-            try:
-                _conn_pool = pool.ThreadedConnectionPool(
-                    1,
-                    10,
-                    settings.supabase_db_url,
-                    connect_timeout=15,
-                    keepalives=1,
-                )
-                break
-            except Exception as exc:  # transient pooler/network blips
-                last_exc = exc
-                time.sleep(2 * (attempt + 1))
-        if _conn_pool is None:
-            raise RuntimeError(f"Could not connect to Supabase: {last_exc}") from last_exc
-    return _conn_pool
+    if _conn_pool is not None:
+        return _conn_pool
+    # Client-side circuit breaker: don't hammer Supabase pooler when it already
+    # returned FATAL/ECIRCUITBREAKER due to too many auth failures.
+    now = time.time()
+    if now - _pool_last_failure_ts < _POOL_COOLDOWN_SECONDS:
+        raise RuntimeError(
+            f"Could not connect to Supabase (cooldown active, {_POOL_COOLDOWN_SECONDS - (now - _pool_last_failure_ts):.0f}s remaining): {_pool_last_error}"
+        ) from None
+    try:
+        _conn_pool = pool.ThreadedConnectionPool(
+            1,
+            10,
+            settings.supabase_db_url,
+            connect_timeout=10,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=3,
+        )
+        _pool_last_error = None
+        return _conn_pool
+    except Exception as exc:  # single attempt only — no retry storm
+        _pool_last_failure_ts = time.time()
+        _pool_last_error = str(exc)
+        logger_db.warning("supabase pool creation failed (cooldown %ss): %s", _POOL_COOLDOWN_SECONDS, exc)
+        raise RuntimeError(f"Could not connect to Supabase: {exc}") from exc
 
 
 def _close_all_connections() -> None:
@@ -96,10 +111,19 @@ def _get_conn():
 
 
 def init_db() -> None:
-    """Create all vtx_* tables and seed rank tiers (idempotent)."""
+    """Create all vtx_* tables and seed rank tiers (idempotent).
+
+    Never crashes the process — if Supabase is down (e.g. ECIRCUITBREAKER
+    after auth failures) the error is logged and startup continues so the
+    health endpoint stays responsive.
+    """
     with INIT_LOCK:
-        with get_db() as conn:
-            _exec(conn,_SCHEMA_FILE.read_text(encoding="utf-8"))
+        try:
+            with get_db() as conn:
+                _exec(conn, _SCHEMA_FILE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger_db.warning("init_db skipped — DB unavailable, health will remain up: %s", exc)
+            # Do NOT raise — allow dashboard/bot to start without DB
 
 
 def get_rank_tiers() -> list[dict]:

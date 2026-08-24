@@ -4,6 +4,8 @@ import asyncio
 import logging
 import time
 
+import os
+
 import aiohttp
 import discord
 from discord.ext import commands, tasks
@@ -13,18 +15,28 @@ from config import settings
 logger = logging.getLogger("scrim-bot.health")
 
 
+def _effective_port() -> int:
+    # Runtime check so $PORT injected by PaaS after import is respected
+    for key in ("PORT", "DASHBOARD_PORT"):
+        val = os.getenv(key)
+        if val and val.strip().isdigit():
+            return int(val.strip())
+    return int(settings.dashboard_port)
+
+
 def _resolve_health_url() -> str:
     raw = (settings.api_health_url or "").strip()
+    port = _effective_port()
     if raw:
         if raw.startswith("/"):
-            return f"http://127.0.0.1:{settings.dashboard_port}{raw}"
+            return f"http://127.0.0.1:{port}{raw}"
         if raw.startswith("http://") or raw.startswith("https://"):
             return raw
         # bare host:port/path without scheme
         if raw.startswith("localhost") or raw.startswith("127.0.0.1"):
             return f"http://{raw}"
         return raw
-    return f"http://127.0.0.1:{settings.dashboard_port}/health"
+    return f"http://127.0.0.1:{port}/health"
 
 
 class HealthPingCog(commands.Cog):

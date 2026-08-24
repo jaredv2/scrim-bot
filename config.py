@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -76,6 +77,20 @@ class Settings(BaseSettings):
     discord_say_hi_user_id: str = ""
     dashboard_admin_password: str = ""
     dashboard_port: int = 8080
+
+    @property
+    def effective_port(self) -> int:
+        """Port the dashboard should actually bind to.
+
+        Honors the platform-injected $PORT (Render/Heroku) first, then
+        $DASHBOARD_PORT, then the .env value. This keeps the container
+        responsive even when the PaaS ignores DASHBOARD_PORT.
+        """
+        for key in ("PORT", "DASHBOARD_PORT"):
+            val = os.getenv(key)
+            if val and val.strip().isdigit():
+                return int(val.strip())
+        return int(self.dashboard_port)
 
     # Silent /health ping (keeps API warm / prevents idle sleep).
     # api_health_url: full URL or path (e.g. "/health" or "http://localhost:8080/health").
