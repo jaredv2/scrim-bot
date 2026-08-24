@@ -72,16 +72,17 @@ def parse_signup(content: str, count: int) -> tuple[list[str], str] | None:
 
     Contract: the whole message must be exactly ``count`` mentions — you
     first, then your teammates — separated by whitespace or a separator
-    (x, X, |, ,, &, /, +, -, .), followed by the skin, e.g.
-    `@you x @teammate FBI Skin`. Returns (discord ids, skin) or None when the
-    message shape doesn't match (casual chat is ignored).
+    (x, X, |, ,, &, /, +, -, .), optionally followed by the skin, e.g.
+    `@you x @teammate FBI Skin` or just `@you @teammate` (falls back to Default).
+    Returns (discord ids, skin) or None when the message shape doesn't match (casual chat is ignored).
     """
-    pattern = _SIGNUP_SEP.join([r"<@!?(\d+)>"] * count) + r"\s+(\w.*)"
-    m = re.fullmatch(pattern, content)
+    # Skin is now optional — fallback to Default in register_team
+    pattern = _SIGNUP_SEP.join([r"<@!?(\d+)>"] * count) + r"(?:\s+(\w.*))?"
+    m = re.fullmatch(pattern, content.strip())
     if not m:
         return None
     ids = [m.group(i) for i in range(1, count + 1)]
-    skin = m.group(count + 1).strip()
+    skin = (m.group(count + 1) or "").strip()
     return ids, skin
 
 
@@ -131,9 +132,7 @@ def register_team(ev: dict, members: list[tuple[str, str]], skin: str) -> dict:
             overlap_names = [names_by_id[did] for did in team_ids if did in overlap]
             return {"ok": False, "code": "ALREADY_REGISTERED", "overlap": sorted(overlap_names)}
 
-    skin = (skin or "").strip()
-    if len(team_ids) > 1 and not skin:
-        return {"ok": False, "code": "SKIN_REQUIRED"}
+    skin = (skin or "").strip() or "Default"
     skin = skin[:SIGNUP_SKIN_MAX]
 
     for did, uname in members:
@@ -276,7 +275,7 @@ class RegisterView(ui.View):
             f"📝 **{ev['name']}** is a **{label}** event — no buttons needed!\n"
             f"Go to {channel_hint} and type:\n"
             f"`{team_signup_format(self.team_size)}`\n"
-            f"Start with your own mention, then your teammate(s), then the skin. "
+            f"Start with your own mention, then your teammate(s), then the skin (optional, defaults to Default). "
             f"The bot registers all of you.",
         )
 
