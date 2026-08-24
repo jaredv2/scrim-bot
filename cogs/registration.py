@@ -286,11 +286,11 @@ class RegistrationCog(commands.Cog):
 
     @commands.hybrid_command(
         name="add-team",
-        description="ADMIN: register a team for an event (first mention = leader)",
+        description="ADMIN: register a team for an event",
     )
     @app_commands.describe(
         event_id="Event ID",
-        players="The full team as mentions (first = team leader)",
+        players="The full team as mentions",
         skin="Team skin (optional, defaults to 'Default')",
     )
     async def add_team(
