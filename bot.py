@@ -215,9 +215,13 @@ class ScrimBot(commands.Bot):
             pass
         else:
             logger.error("command_error: %s — %s", ctx.command, error, exc_info=True)
+            safe = _safe_msg(error)
+            # Friendly hint for DB cooldown
+            if "cooldown active" in safe.lower() or "could not connect to supabase" in safe.lower():
+                safe = "⚠️ Database temporarily unavailable (Supabase cooldown). Try again in ~60s. If this persists, check `SUPABASE_DB_URL`."
             await ctx.send(
                 embed=discord.Embed(
-                    description=f"An error occurred: {error}",
+                    description=f"An error occurred: {safe}",
                     color=0xE74C3C,
                 )
             )
@@ -231,11 +235,14 @@ class ScrimBot(commands.Bot):
             )
             return
         if isinstance(error, app_commands.TransformerError):
-            msg = f"**Invalid argument type:** {error}"
+            msg = f"**Invalid argument type:** {_safe_msg(error)}"
         elif isinstance(error, app_commands.CommandInvokeError):
-            msg = f"**Command error:** {error.original}"
+            orig = _safe_msg(error.original)
+            if "cooldown active" in orig.lower() or "could not connect to supabase" in orig.lower():
+                orig = "Database temporarily unavailable (Supabase cooldown). Try again in ~60s."
+            msg = f"**Command error:** {orig}"
         else:
-            msg = f"**Error:** {error}"
+            msg = f"**Error:** {_safe_msg(error)}"
 
         embed = discord.Embed(description=msg, color=0xE74C3C)
         try:
@@ -260,6 +267,18 @@ class ScrimBot(commands.Bot):
             logger.info("commands_synced", extra={"count": len(cmds)})
         except Exception:
             logger.exception("command sync failed")
+
+
+def _safe_msg(obj: object, limit: int = 1500) -> str:
+    try:
+        s = str(obj)
+    except Exception:
+        try:
+            s = repr(obj)
+        except Exception:
+            s = "unknown error"
+    # Discord embeds must be valid utf-8
+    return s.encode("utf-8", errors="replace").decode("utf-8", errors="replace")[:limit]
 
 
 async def main() -> None:

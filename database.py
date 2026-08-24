@@ -29,6 +29,21 @@ _POOL_COOLDOWN_SECONDS: float = 60.0
 logger_db = logging.getLogger("scrim-bot.db")
 
 
+def _safe_exc_str(exc: BaseException) -> str:
+    """Return a utf-8 safe string for any exception, even with binary payloads."""
+    try:
+        s = str(exc)
+        # Ensure it can be encoded as utf-8 for Discord embeds / logs
+        s.encode("utf-8")
+        return s
+    except Exception:
+        try:
+            # Fallback: repr with replacement
+            return repr(exc).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        except Exception:
+            return "unknown database error"
+
+
 def _get_pool() -> pool.ThreadedConnectionPool:
     global _conn_pool, _pool_last_failure_ts, _pool_last_error
     if not settings.supabase_db_url:
@@ -39,8 +54,9 @@ def _get_pool() -> pool.ThreadedConnectionPool:
     # returned FATAL/ECIRCUITBREAKER due to too many auth failures.
     now = time.time()
     if now - _pool_last_failure_ts < _POOL_COOLDOWN_SECONDS:
+        safe_last = (_pool_last_error or "unknown").encode("utf-8", errors="replace").decode("utf-8", errors="replace")[:500]
         raise RuntimeError(
-            f"Could not connect to Supabase (cooldown active, {_POOL_COOLDOWN_SECONDS - (now - _pool_last_failure_ts):.0f}s remaining): {_pool_last_error}"
+            f"Could not connect to Supabase (cooldown active, {_POOL_COOLDOWN_SECONDS - (now - _pool_last_failure_ts):.0f}s remaining): {safe_last}"
         ) from None
     try:
         _conn_pool = pool.ThreadedConnectionPool(
@@ -57,9 +73,9 @@ def _get_pool() -> pool.ThreadedConnectionPool:
         return _conn_pool
     except Exception as exc:  # single attempt only — no retry storm
         _pool_last_failure_ts = time.time()
-        _pool_last_error = str(exc)
-        logger_db.warning("supabase pool creation failed (cooldown %ss): %s", _POOL_COOLDOWN_SECONDS, exc)
-        raise RuntimeError(f"Could not connect to Supabase: {exc}") from exc
+        _pool_last_error = _safe_exc_str(exc)
+        logger_db.warning("supabase pool creation failed (cooldown %ss): %s", _POOL_COOLDOWN_SECONDS, _pool_last_error)
+        raise RuntimeError(f"Could not connect to Supabase: {_pool_last_error}") from exc
 
 
 def _close_all_connections() -> None:
