@@ -71,6 +71,28 @@ TEMPLATE_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
+# Starlette 0.36+ changed Jinja2Templates.TemplateResponse signature from
+# TemplateResponse(request, name, context) to TemplateResponse(name, {"request": request, ...})
+# Shim to accept both so old calls like TemplateResponse(request, "index.html", {...}) keep working.
+_orig_tr = templates.TemplateResponse  # type: ignore[attr-defined]
+
+def _compat_template_response(request_or_name, maybe_name=None, maybe_context=None, **kwargs):  # type: ignore[no-untyped-def]
+    from fastapi.requests import Request as _Req
+
+    if isinstance(request_or_name, _Req):
+        # Old style: TemplateResponse(request, "template.html", {...})
+        req = request_or_name
+        name = maybe_name
+        ctx = maybe_context if isinstance(maybe_context, dict) else {}
+        # Ensure request is in context for new Starlette
+        if "request" not in ctx:
+            ctx = {"request": req, **ctx}
+        return _orig_tr(name, ctx, **kwargs)  # type: ignore[misc]
+    # New style already: TemplateResponse("template.html", {"request": request, ...})
+    return _orig_tr(request_or_name, maybe_name, **kwargs)  # type: ignore[misc]
+
+templates.TemplateResponse = _compat_template_response  # type: ignore[attr-defined]
+
 
 def _fmt_dt(value, secs: bool = False) -> str:
     """Render a DB timestamp (datetime or str) as 'YYYY-MM-DD HH:MM[:SS]'."""
