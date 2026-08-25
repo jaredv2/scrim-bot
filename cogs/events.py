@@ -17,12 +17,16 @@ from templates_fmt import (
     to_unix_ts,
 )
 
+import asyncio
+
 from database import (
     award_coins_for_placements,
+    calc_event_pr,
     create_event_record,
     create_game_record,
     event_awards_pr,
     execute,
+    execute_many,
     get_divisions,
     get_event,
     get_event_players,
@@ -743,28 +747,47 @@ class EventsCog(commands.Cog):
         if ctx.interaction:
             await ctx.interaction.response.defer(ephemeral=True)
 
-        ev = get_event(event_id)
+        try:
+            ev = await asyncio.to_thread(get_event, event_id)
+        except Exception as e:
+            safe = str(e).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+            await ctx.send(embed=error(f"Database error: {safe[:500]}"))
+            return
         if not ev:
             await ctx.send(embed=error("Event not found."))
             return
 
-        execute("UPDATE vtx_events SET status = 'completed' WHERE id = %s", (event_id,))
+        await asyncio.to_thread(execute, "UPDATE vtx_events SET status = 'completed' WHERE id = %s", (event_id,))
 
+        # Batched + cached board (was N+1)
         if ev.get("team_size", 1) >= 2:
-            board = get_team_leaderboard(event_id)
+            board = await asyncio.to_thread(get_team_leaderboard, event_id)
         else:
-            board = get_leaderboard(event_id)
+            board = await asyncio.to_thread(get_leaderboard, event_id)
 
-        if event_awards_pr(ev):
-            for row in board:
-                did = row.get("discord_id") or row.get("lead_id")
-                if did:
-                    update_player_pr(did, event_id=event_id)
-            await self._sync_ranks(ctx, board)
+        if event_awards_pr(ev) and board:
+            # Single calc + batched UPDATE (was N * calc_event_pr)
+            try:
+                pr_map = await asyncio.to_thread(calc_event_pr, event_id)
+                if pr_map:
+                    updates = []
+                    for row in board:
+                        did = row.get("discord_id") or row.get("lead_id")
+                        if did and did in pr_map:
+                            updates.append((pr_map[did], did))
+                    if updates:
+                        await asyncio.to_thread(execute_many, "UPDATE vtx_players SET pr = %s WHERE discord_id = %s", updates)
+                await self._sync_ranks_fast(ctx, board)
+            except Exception as e:
+                safe = str(e).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+                await ctx.send(embed=error(f"PR update failed: {safe[:300]}"))
 
         if board:
             winner_did = board[0].get("discord_id") or board[0].get("lead_id")
-            await sync_crown_role(ctx.guild, winner_did)
+            try:
+                await sync_crown_role(ctx.guild, winner_did)
+            except Exception:
+                pass
 
         channel = ctx.guild.get_channel(
             int(ev["dispatch_channel_id"] or 0)
@@ -1203,6 +1226,36 @@ class EventsCog(commands.Cog):
                 await sync_rank_role(ctx.guild, member, (p["pr"] if p else 0) or 0)
             except Exception:
                 pass
+
+    async def _sync_ranks_fast(self, ctx: commands.Context, board: list[dict]) -> None:
+        # Batched + parallel — was sequential per-member (1 query + 1 API call each)
+        dids = []
+        for row in board:
+            did = row.get("discord_id") or row.get("lead_id")
+            if did:
+                dids.append(did)
+        if not dids:
+            return
+        # Single query for all PRs
+        try:
+            ph = ",".join(["%s"]*len(dids))
+            rows = await asyncio.to_thread(query, f"SELECT discord_id, pr FROM vtx_players WHERE discord_id IN ({ph})", tuple(dids))
+            pr_map = {r["discord_id"]: r["pr"] or 0 for r in rows}
+        except Exception:
+            pr_map = {}
+        # Parallel role syncs (was sequential, hit rate limits)
+        async def _one(did: str):
+            member = ctx.guild.get_member(int(did)) if did.isdigit() else None
+            if not member:
+                return
+            try:
+                pr = pr_map.get(did, 0)
+                await sync_rank_role(ctx.guild, member, pr)
+            except Exception:
+                pass
+        # Limit concurrency to avoid Discord rate limit burst (10 at a time)
+        for i in range(0, len(dids), 10):
+            await asyncio.gather(*[_one(d) for d in dids[i:i+10]])
 
     async def _check_admin(self, ctx: commands.Context) -> bool:
         if not ctx.guild:

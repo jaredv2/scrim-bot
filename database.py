@@ -1079,32 +1079,45 @@ def calc_event_pr(event_id: int) -> dict[str, float]:
 
     ph = ",".join(["%s"] * len(game_ids))
 
+    # Batched: single lookup for all dids -> pids and single aggregation per pid
+    all_dids = set()
+    for r in registrations:
+        if is_team:
+            if not r.get("team_members"):
+                continue
+            all_dids.add(r["discord_id"])
+            for m in (r.get("team_members") or "").split(","):
+                m=m.strip()
+                if m:
+                    all_dids.add(m)
+        else:
+            all_dids.add(r["discord_id"])
+    did_to_pid = {}
+    if all_dids:
+        ph_dids = ",".join(["%s"]*len(all_dids))
+        rows = query(f"SELECT id, discord_id FROM vtx_players WHERE discord_id IN ({ph_dids})", tuple(all_dids))
+        did_to_pid = {r["discord_id"]: r["id"] for r in rows}
+    # One query for all game_players of this event, grouped by player
+    agg_by_pid = {}
+    if did_to_pid:
+        pids = list(did_to_pid.values())
+        ph_pids = ",".join(["%s"]*len(pids))
+        rows = query(
+            f"SELECT player_id, COALESCE(SUM(points),0) as pts, COALESCE(SUM(kills),0) as k, "
+            f"COUNT(CASE WHEN placement=1 THEN 1 END) as w "
+            f"FROM vtx_game_players WHERE game_id IN ({ph}) AND player_id IN ({ph_pids}) GROUP BY player_id",
+            (*game_ids, *pids),
+        )
+        agg_by_pid = {r["player_id"]: r for r in rows}
     if is_team:
         result = {}
         for reg in registrations:
             if not reg.get("team_members"):
                 continue
-            all_ids = [reg["discord_id"]]
-            all_ids.extend(mid.strip() for mid in reg["team_members"].split(",") if mid.strip())
-
-            total_points = 0
-            total_kills = 0
-            wins = 0
-            for did in all_ids:
-                p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (did,))
-                if not p:
-                    continue
-                rows = query(
-                    f"SELECT COALESCE(SUM(points),0) AS pts, COALESCE(SUM(kills),0) AS k, "
-                    f"COUNT(CASE WHEN placement = 1 THEN 1 END) AS w "
-                    f"FROM vtx_game_players WHERE game_id IN ({ph}) AND player_id = %s",
-                    (*game_ids, p["id"]),
-                )
-                if rows:
-                    total_points += rows[0]["pts"]
-                    total_kills += rows[0]["k"]
-                    wins += rows[0]["w"]
-
+            all_ids = [reg["discord_id"]] + [m.strip() for m in (reg.get("team_members") or "").split(",") if m.strip()]
+            total_points = sum((agg_by_pid.get(did_to_pid.get(did), {}) or {}).get("pts", 0) for did in all_ids if did in did_to_pid)
+            total_kills = sum((agg_by_pid.get(did_to_pid.get(did), {}) or {}).get("k", 0) for did in all_ids if did in did_to_pid)
+            wins = sum((agg_by_pid.get(did_to_pid.get(did), {}) or {}).get("w", 0) for did in all_ids if did in did_to_pid)
             if scoring_mode == "placement_only":
                 raw_pr = total_points
             else:
@@ -1116,22 +1129,11 @@ def calc_event_pr(event_id: int) -> dict[str, float]:
         result = {}
         for reg in registrations:
             did = reg["discord_id"]
-            p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (did,))
-            if not p:
-                continue
-            rows = query(
-                f"SELECT COALESCE(SUM(points),0) AS pts, COALESCE(SUM(kills),0) AS k, "
-                f"COUNT(CASE WHEN placement = 1 THEN 1 END) AS w "
-                f"FROM vtx_game_players WHERE game_id IN ({ph}) AND player_id = %s",
-                (*game_ids, p["id"]),
-            )
-            if rows:
-                total_points = rows[0]["pts"]
-                total_kills = rows[0]["k"]
-                wins = rows[0]["w"]
-            else:
-                total_points = total_kills = wins = 0
-
+            pid = did_to_pid.get(did)
+            agg = agg_by_pid.get(pid, {}) if pid else {}
+            total_points = agg.get("pts", 0) if agg else 0
+            total_kills = agg.get("k", 0) if agg else 0
+            wins = agg.get("w", 0) if agg else 0
             if scoring_mode == "placement_only":
                 raw_pr = total_points
             else:
