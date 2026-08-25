@@ -233,15 +233,53 @@ class RegisterView(ui.View):
             return True
         return count_event_players(ev["id"]) < max_players
 
+    def _resolve_event(self, interaction: discord.Interaction) -> tuple[dict | None, int]:
+        """Resolve event for this interaction. Uses stored event_id if available,
+        otherwise looks up the active registration event for the channel (for
+        persistent views after bot restart). Returns (ev, team_size)."""
+        ev = None
+        if self.event_id:
+            try:
+                ev = get_event(self.event_id)
+            except Exception:
+                ev = None
+        if ev:
+            return ev, ev.get("team_size", self.team_size)
+        # Fallback: lookup active registration in this channel (persistent view)
+        try:
+            channel_id = str(interaction.channel.id) if interaction.channel else None
+            if channel_id:
+                ev = query_one(
+                    "SELECT * FROM vtx_events WHERE status='registration' AND (signup_channel_id=%s OR channel_id=%s) ORDER BY id DESC LIMIT 1",
+                    (channel_id, channel_id),
+                )
+                if ev:
+                    return ev, ev.get("team_size", 1)
+        except Exception:
+            pass
+        return None, self.team_size
+
     @ui.button(label="Register", style=discord.ButtonStyle.green, custom_id="register_button")
     async def register(self, interaction: discord.Interaction, button: ui.Button) -> None:
         try:
+            # Fast pre-checks without DB where possible — respond within 3s
+            # For solo, we will send modal immediately to avoid DB latency timeout
+            ev, team_size = self._resolve_event(interaction)
+            if not ev:
+                await _safe_ephemeral(interaction, "Event not found. Try again or contact staff.")
+                return
+            # Solo: send modal immediately as first response (must be <3s), skip slow checks
+            if team_size == 1:
+                # Minimal fast check: only check status (already have ev)
+                if ev["status"] != "registration":
+                    await _safe_ephemeral(interaction, "Registration is not open.")
+                    return
+                # Directly go to solo flow which will send modal immediately
+                await self._register_solo_fast(interaction, ev)
+                return
+            # Team: need to hint
             if is_player_banned(str(interaction.user.id)):
                 await _safe_ephemeral(interaction, "🚫 You are banned from registering.")
-                return
-            ev = get_event(self.event_id)
-            if not ev:
-                await _safe_ephemeral(interaction, "Event not found.")
                 return
             if ev["status"] != "registration":
                 await _safe_ephemeral(interaction, "Registration is not open.")
@@ -249,16 +287,11 @@ class RegisterView(ui.View):
             if not self._can_register(ev):
                 await _safe_ephemeral(interaction, "🚫 **The event is full!** No more spots available.")
                 return
-
-            if self.team_size == 1:
-                await self._register_solo(interaction, ev)
-            else:
-                await self._hint_team_signup(interaction, ev)
+            await self._hint_team_signup(interaction, ev)
         except discord.NotFound:
             logger.debug("RegisterView.register: Unknown interaction (expired)", exc_info=True)
         except Exception:
             logger.exception("RegisterView.register failed")
-            # Try to inform user if we can
             try:
                 await _safe_ephemeral(interaction, "⚠️ Something went wrong. Please try again.")
             except Exception:
@@ -278,6 +311,83 @@ class RegisterView(ui.View):
             f"Start with your own mention, then your teammate(s), then the skin (optional, defaults to Default). "
             f"The bot registers all of you.",
         )
+
+    async def _register_solo_fast(self, interaction: discord.Interaction, ev: dict) -> None:
+        """Fast solo path — send modal immediately (<3s) to avoid interaction timeout.
+        All slow DB checks are done after modal submission."""
+        discord_id = str(interaction.user.id)
+        username = interaction.user.display_name
+        modal = IGNModal(event_id=ev["id"])
+        try:
+            await interaction.response.send_modal(modal)
+        except discord.NotFound:
+            logger.debug("IGNModal fast send_modal failed — interaction expired", exc_info=True)
+            return
+        except discord.InteractionResponded:
+            await _safe_ephemeral(interaction, "⚠️ Please try again — interaction timed out.")
+            return
+        except Exception as e:
+            logger.debug("IGNModal fast send failed: %s", e)
+            await _safe_ephemeral(interaction, "⚠️ Could not open form. Try again.")
+            return
+        await modal.wait()
+        ign = (modal.result or "").strip() or username
+        # If user closed modal without submitting, modal.result will be None
+        if not modal.result:
+            await _safe_ephemeral(interaction, "Registration cancelled.")
+            return
+        # Now do slow checks after modal (have 15min via followup)
+        try:
+            if is_player_banned(discord_id):
+                await _safe_ephemeral(interaction, "🚫 You are banned from registering.")
+                return
+            entry = check_event_entry(ev["id"], discord_id)
+            if not entry["ok"]:
+                await _safe_ephemeral(interaction, f"🚫 {entry['reason']}")
+                return
+            existing = query_one(
+                "SELECT * FROM vtx_registrations WHERE event_id = %s AND discord_id = %s",
+                (ev["id"], discord_id),
+            )
+            if existing and existing["status"] == "confirmed":
+                await _safe_ephemeral(interaction, "You are already registered.")
+                return
+            if not self._can_register(ev):
+                await _safe_ephemeral(interaction, "🚫 **The event is full!** No more spots available.")
+                return
+            upsert_player(discord_id, username)
+            execute(
+                "UPDATE vtx_players SET game_username = %s WHERE discord_id = %s",
+                (ign, discord_id),
+            )
+            try:
+                await interaction.followup.send(
+                    "⚠️ Changing your in-game name later will require running the `/change-ign` command.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+            if existing:
+                execute(
+                    "UPDATE vtx_registrations SET username = %s, team_members = NULL, status='confirmed' WHERE id=%s",
+                    (username, existing["id"]),
+                )
+            else:
+                execute(
+                    "INSERT INTO vtx_registrations (event_id, discord_id, username, status) VALUES (%s,%s,%s,'confirmed')",
+                    (ev["id"], discord_id, username),
+                )
+            regs = get_event_registrations(ev["id"])
+            total_players = self._count_players(regs)
+            await interaction.followup.send(
+                f"✅ {interaction.user.mention} ({ign}) registered for **{ev['name']}** ({total_players} player{'s' if total_players != 1 else ''})",
+                ephemeral=False,
+            )
+        except discord.NotFound:
+            logger.debug("solo fast followup failed — expired", exc_info=True)
+        except Exception:
+            logger.exception("solo fast registration failed")
+            await _safe_ephemeral(interaction, "⚠️ Registration failed. Try again.")
 
     async def _register_solo(self, interaction: discord.Interaction, ev: dict) -> None:
         discord_id = str(interaction.user.id)
@@ -752,3 +862,8 @@ class RegistrationHandler(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(RegistrationHandler(bot))
+    # Persistent view: survives bot restarts, handles clicks on old messages
+    try:
+        bot.add_view(RegisterView(event_id=0, team_size=1))
+    except Exception:
+        pass
