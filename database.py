@@ -226,6 +226,31 @@ def _exec(conn, sql: str, params: tuple = ()):
     return cur
 
 
+# --- Dashboard perf: TTL cache for heavy leaderboards (3s) ---
+_board_cache: dict = {}
+_board_cache_lock = threading.Lock()
+_BOARD_TTL = 3.0
+
+def _cache_get(key: str):
+    with _board_cache_lock:
+        ent = _board_cache.get(key)
+        if ent and (time.time() - ent[0] < _BOARD_TTL):
+            return ent[1]
+    return None
+
+def _cache_set(key: str, val):
+    with _board_cache_lock:
+        _board_cache[key] = (time.time(), val)
+
+def _cache_invalidate(prefix: str = ""):
+    with _board_cache_lock:
+        if not prefix:
+            _board_cache.clear()
+        else:
+            for k in list(_board_cache.keys()):
+                if k.startswith(prefix):
+                    del _board_cache[k]
+
 _NO_ID_TABLES = {"vtx_kv_store", "vtx_user_messages", "vtx_invite_coins"}
 
 
@@ -247,6 +272,10 @@ def query_one(sql: str, params: tuple = ()) -> dict | None:
 def execute(sql: str, params: tuple = ()) -> int:
     """Run a statement. For plain INSERTs returns the new row id (mirrors the
     old sqlite lastrowid); otherwise returns the affected row count."""
+    # Invalidate leaderboard cache on writes that affect scoring
+    low = sql.lower()
+    if any(t in low for t in ("vtx_game_players", "vtx_registrations", "vtx_games", "vtx_events")):
+        _cache_invalidate("board:")
     with get_db() as conn:
         with conn.cursor() as cur:
             if sql.lstrip()[:6].upper() == "INSERT" and "RETURNING" not in sql.upper():
@@ -353,6 +382,11 @@ def get_game_players(game_id: int) -> list[dict]:
 
 
 def get_game_team_leaderboard(game_id: int, event_id: int) -> list[dict]:
+    # Batched version — was N+1 per team per player
+    ck = f"board:gameteam:{game_id}:{event_id}"
+    c = _cache_get(ck)
+    if c is not None:
+        return c
     registrations = query(
         "SELECT * FROM vtx_registrations WHERE event_id = %s AND status = 'confirmed' "
         "ORDER BY created_at",
@@ -360,53 +394,44 @@ def get_game_team_leaderboard(game_id: int, event_id: int) -> list[dict]:
     )
     if not registrations:
         return []
-
     game = query_one("SELECT id FROM vtx_games WHERE id = %s", (game_id,))
     if not game:
         return []
-
-    result = []
+    # Batch player lookups
+    all_dids = set()
     for reg in registrations:
-        all_ids = [reg["discord_id"]]
-        if reg["team_members"]:
-            all_ids.extend(mid.strip() for mid in reg["team_members"].split(",") if mid.strip())
-
-        player_ids = []
-        for did in all_ids:
-            p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (did,))
-            if p:
-                player_ids.append(p["id"])
-
-        total_points = 0
-        total_kills = 0
-        is_dq = 0
-        best_placement = None
-        for pid in player_ids:
-            gp = query_one(
-                "SELECT points, kills, is_disqualified, placement "
-                "FROM vtx_game_players WHERE game_id = %s AND player_id = %s",
-                (game_id, pid),
-            )
-            if gp:
-                total_points += gp["points"] or 0
-                total_kills += gp["kills"] or 0
-                if gp["is_disqualified"]:
-                    is_dq = 1
-                if gp["placement"] and gp["placement"] > 0:
-                    if best_placement is None or gp["placement"] < best_placement:
-                        best_placement = gp["placement"]
-
+        all_dids.add(reg["discord_id"])
+        if reg.get("team_members"):
+            for mid in reg["team_members"].split(","):
+                mid=mid.strip()
+                if mid:
+                    all_dids.add(mid)
+    did_to_pid = {}
+    if all_dids:
+        ph=",".join(["%s"]*len(all_dids))
+        rows=query(f"SELECT id, discord_id FROM vtx_players WHERE discord_id IN ({ph})", tuple(all_dids))
+        did_to_pid={r["discord_id"]: r["id"] for r in rows}
+    # Single query for all game_players of this game
+    gp_rows = query("SELECT player_id, points, kills, is_disqualified, placement FROM vtx_game_players WHERE game_id=%s", (game_id,))
+    by_pid={r["player_id"]: r for r in gp_rows}
+    result=[]
+    for reg in registrations:
+        all_ids=[reg["discord_id"]]
+        if reg.get("team_members"):
+            all_ids.extend([m.strip() for m in reg["team_members"].split(",") if m.strip()])
+        pids=[did_to_pid[did] for did in all_ids if did in did_to_pid]
+        total_points=sum((by_pid.get(pid) or {}).get("points") or 0 for pid in pids)
+        total_kills=sum((by_pid.get(pid) or {}).get("kills") or 0 for pid in pids)
+        is_dq=1 if any((by_pid.get(pid) or {}).get("is_disqualified") for pid in pids) else 0
+        placements=[(by_pid.get(pid) or {}).get("placement") for pid in pids]
+        placements=[p for p in placements if p]
+        best=min(placements) if placements else None
         result.append({
-            "team_name": reg["username"],
-            "lead_id": reg["discord_id"],
-            "team_members": reg["team_members"],
-            "total_points": total_points,
-            "total_kills": total_kills,
-            "is_dq": is_dq,
-            "best_placement": best_placement,
+            "team_name": reg["username"], "lead_id": reg["discord_id"], "team_members": reg["team_members"],
+            "total_points": total_points, "total_kills": total_kills, "is_dq": is_dq, "best_placement": best,
         })
-
     result.sort(key=lambda x: (x["is_dq"], -x["total_points"]))
+    _cache_set(ck, result)
     return result
 
 
@@ -442,6 +467,10 @@ def get_event_lobbies(event_id: int) -> list[dict]:
 
 
 def get_leaderboard(event_id: int) -> list[dict]:
+    ck = f"board:solo:{event_id}"
+    c = _cache_get(ck)
+    if c is not None:
+        return c
     rows = query(
         "SELECT p.id, COALESCE(p.game_username, p.username) AS username, p.discord_id, "
         "SUM(gp.points) AS total_points, "
@@ -455,7 +484,9 @@ def get_leaderboard(event_id: int) -> list[dict]:
         "ORDER BY is_dq ASC, total_points DESC",
         (event_id,),
     )
-    return _enrich_solo_leaderboard(event_id, rows)
+    res = _enrich_solo_leaderboard(event_id, rows)
+    _cache_set(ck, res)
+    return res
 
 
 def _parse_placement_scale(ev: dict) -> list[int]:
@@ -562,104 +593,113 @@ def get_solo_leaderboard(event_id: int) -> list[dict]:
 
 
 def get_team_leaderboard(event_id: int) -> list[dict]:
+    # Cached, batched — was N+1 (per-team per-player per-game). Now 4 queries total.
+    ck = f"board:team:{event_id}"
+    cached = _cache_get(ck)
+    if cached is not None:
+        return cached
     registrations = query(
         "SELECT * FROM vtx_registrations WHERE event_id = %s AND status = 'confirmed' "
         "ORDER BY created_at",
         (event_id,),
     )
     if not registrations:
+        _cache_set(ck, [])
         return []
-
     ev = get_event(event_id)
     scale = _parse_placement_scale(ev) if ev else []
-
     games = query("SELECT id FROM vtx_games WHERE event_id = %s", (event_id,))
     game_ids = [g["id"] for g in games]
-
+    if not game_ids:
+        # No games yet — return zeroed boards without per-player lookups
+        res = []
+        for reg in registrations:
+            res.append({
+                "team_name": reg["username"], "lead_id": reg["discord_id"], "team_members": reg["team_members"],
+                "total_points": 0, "total_kills": 0, "is_dq": 0, "games_played": 0,
+                "wins": 0, "placements": [], "placement_points": 0, "avg_placement": None, "avg_points": 0,
+            })
+        _cache_set(ck, res)
+        return res
+    # Batch: all discord_ids -> player_ids, and all game_players for these games
+    all_dids = set()
+    for reg in registrations:
+        all_dids.add(reg["discord_id"])
+        if reg.get("team_members"):
+            for mid in reg["team_members"].split(","):
+                mid=mid.strip()
+                if mid:
+                    all_dids.add(mid)
+    did_to_pid = {}
+    if all_dids:
+        ph = ",".join(["%s"] * len(all_dids))
+        rows = query(f"SELECT id, discord_id FROM vtx_players WHERE discord_id IN ({ph})", tuple(all_dids))
+        did_to_pid = {r["discord_id"]: r["id"] for r in rows}
+    # Single query for all game_players of this event
+    ph_games = ",".join(["%s"] * len(game_ids))
+    gp_rows = query(
+        f"SELECT player_id, game_id, points, kills, is_disqualified, placement "
+        f"FROM vtx_game_players WHERE game_id IN ({ph_games})",
+        tuple(game_ids),
+    )
+    # Index by player_id
+    by_pid: dict[int, list] = {}
+    for r in gp_rows:
+        by_pid.setdefault(r["player_id"], []).append(r)
     result = []
     for reg in registrations:
         all_ids = [reg["discord_id"]]
-        if reg["team_members"]:
-            all_ids.extend(mid.strip() for mid in reg["team_members"].split(",") if mid.strip())
-
-        player_ids = []
-        for did in all_ids:
-            p = query_one("SELECT id FROM vtx_players WHERE discord_id = %s", (did,))
-            if p:
-                player_ids.append(p["id"])
-
-        total_points = 0
-        total_kills = 0
-        is_dq = 0
-        played_game_ids = set()
-        best_by_game = {}
-        for pid in player_ids:
-            if game_ids:
-                ph = ",".join(["%s"] * len(game_ids))
-                rows = query(
-                    f"SELECT COALESCE(SUM(points),0) AS pts, COALESCE(SUM(kills),0) AS k, "
-                    f"MAX(is_disqualified) AS dq FROM vtx_game_players "
-                    f"WHERE game_id IN ({ph}) AND player_id = %s",
-                    (*game_ids, pid),
-                )
-                if rows:
-                    total_points += rows[0]["pts"]
-                    total_kills += rows[0]["k"]
-                    if rows[0]["dq"]:
-                        is_dq = 1
-                member_games = query(
-                    f"SELECT DISTINCT game_id FROM vtx_game_players WHERE game_id IN ({ph}) AND player_id = %s",
-                    (*game_ids, pid),
-                )
-                for mg in member_games:
-                    played_game_ids.add(mg["game_id"])
-                placements = query(
-                    f"SELECT game_id, placement FROM vtx_game_players "
-                    f"WHERE game_id IN ({ph}) AND player_id = %s AND placement IS NOT NULL",
-                    (*game_ids, pid),
-                )
-                for pl in placements:
-                    best_by_game.setdefault(pl["game_id"], []).append(pl["placement"])
-
+        if reg.get("team_members"):
+            all_ids.extend([m.strip() for m in reg["team_members"].split(",") if m.strip()])
+        pids = [did_to_pid[did] for did in all_ids if did in did_to_pid]
+        total_points = sum(sum(x["points"] or 0 for x in by_pid.get(pid, [])) for pid in pids)
+        total_kills = sum(sum(x["kills"] or 0 for x in by_pid.get(pid, [])) for pid in pids)
+        is_dq = 1 if any(any(x["is_disqualified"] for x in by_pid.get(pid, [])) for pid in pids) else 0
+        played = set()
+        best_by_game: dict[int, list] = {}
+        for pid in pids:
+            for x in by_pid.get(pid, []):
+                played.add(x["game_id"])
+                if x["placement"] is not None:
+                    best_by_game.setdefault(x["game_id"], []).append(x["placement"])
         best_placements = [min(v) for v in best_by_game.values()]
-        games_played = len(played_game_ids)
-
+        games_played = len(played)
         result.append({
-            "team_name": reg["username"],
-            "lead_id": reg["discord_id"],
-            "team_members": reg["team_members"],
-            "total_points": total_points,
-            "total_kills": total_kills,
-            "is_dq": is_dq,
-            "games_played": games_played,
+            "team_name": reg["username"], "lead_id": reg["discord_id"], "team_members": reg["team_members"],
+            "total_points": total_points, "total_kills": total_kills, "is_dq": is_dq, "games_played": games_played,
             "wins": sum(1 for p in best_placements if p == 1),
             "placements": best_placements,
-            "placement_points": sum(
-                scale[p - 1] for p in best_placements if 1 <= p <= len(scale)
-            ),
-            "avg_placement": round(sum(best_placements) / len(best_placements), 1) if best_placements else None,
-            "avg_points": round(total_points / games_played, 1) if games_played else 0,
+            "placement_points": sum(scale[p-1] for p in best_placements if 1 <= p <= len(scale)),
+            "avg_placement": round(sum(best_placements)/len(best_placements),1) if best_placements else None,
+            "avg_points": round(total_points/games_played,1) if games_played else 0,
         })
-
     result.sort(key=lambda x: (x["is_dq"], -x["total_points"]))
-
-    g = query_one("SELECT season FROM vtx_games WHERE event_id = %s LIMIT 1", (event_id,))
-    season = g["season"] if g else 1
-    for reg_row in result:
-        ids = [reg_row["lead_id"]]
-        ids += [
-            m.strip()
-            for m in (reg_row.get("team_members") or "").split(",")
-            if m.strip()
-        ]
-        ph = ",".join(["%s"] * len(ids))
-        ew = query_one(
-            f"SELECT COUNT(DISTINCT ew.event_id) AS c FROM vtx_event_wins ew "
-            f"JOIN vtx_players p ON ew.player_id = p.id "
-            f"WHERE p.discord_id IN ({ph}) AND ew.season = %s",
-            (*ids, season),
-        )
-        reg_row["wins"] = (reg_row.get("wins") or 0) + (ew["c"] if ew else 0)
+    # Wins from vtx_event_wins — batch in one query instead of per-team
+    try:
+        g = query_one("SELECT season FROM vtx_games WHERE event_id = %s LIMIT 1", (event_id,))
+        season = g["season"] if g else 1
+        # Collect all team discord_ids for win lookup
+        all_team_dids = []
+        for r in result:
+            all_team_dids.append(r["lead_id"])
+            if r.get("team_members"):
+                all_team_dids.extend([m.strip() for m in r["team_members"].split(",") if m.strip()])
+        if all_team_dids:
+            uniq = list(set(all_team_dids))
+            ph = ",".join(["%s"] * len(uniq))
+            win_rows = query(
+                f"SELECT p.discord_id, COUNT(DISTINCT ew.event_id) as c FROM vtx_event_wins ew "
+                f"JOIN vtx_players p ON ew.player_id=p.id WHERE p.discord_id IN ({ph}) AND ew.season=%s GROUP BY p.discord_id",
+                (*uniq, season),
+            )
+            win_map = {r["discord_id"]: r["c"] for r in win_rows}
+            for r in result:
+                ids = [r["lead_id"]] + ([m.strip() for m in (r.get("team_members") or "").split(",") if m.strip()])
+                extra = sum(win_map.get(did, 0) for did in ids)
+                r["wins"] = (r.get("wins") or 0) + extra
+    except Exception:
+        pass
+    _cache_set(ck, result)
     return result
 
 

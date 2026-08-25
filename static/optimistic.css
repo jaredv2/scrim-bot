@@ -1,0 +1,7 @@
+/* Optimistic UI — pending states */
+.opt-pending { font-weight: 700; }
+.opt-row-pending { opacity: 0.85; }
+.opt-btn-pending { opacity: 0.6; cursor: wait; pointer-events: none; }
+.dq-row { opacity: 0.55; }
+tr[data-discord].opt-row-pending { background: #fef9e7; }
+#opt-toast { pointer-events: none; }

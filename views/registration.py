@@ -283,23 +283,23 @@ class RegisterView(ui.View):
         discord_id = str(interaction.user.id)
         username = interaction.user.display_name
 
-        entry = check_event_entry(ev["id"], discord_id)
-        if not entry["ok"]:
-            await _safe_ephemeral(interaction, f"🚫 {entry['reason']}")
+        # Fast checks only — no DB queries yet
+        if is_player_banned(discord_id):
+            await _safe_ephemeral(interaction, "🚫 You are banned from registering.")
+            return
+        if ev["status"] != "registration":
+            await _safe_ephemeral(interaction, "Registration is not open.")
+            return
+        if not self._can_register(ev):
+            await _safe_ephemeral(interaction, "🚫 **The event is full!** No more spots available.")
             return
 
-        existing = query_one(
-            "SELECT * FROM vtx_registrations WHERE event_id = %s AND discord_id = %s",
-            (ev["id"], discord_id),
-        )
-        if existing and existing["status"] == "confirmed":
-            await _safe_ephemeral(interaction, "You are already registered.")
-            return
+        # Quick check: does user already have an IGN?
+        player = query_one("SELECT game_username FROM vtx_players WHERE discord_id = %s", (discord_id,))
+        has_ign = player and player.get("game_username")
 
-        upsert_player(discord_id, username)
-        player = query_one("SELECT * FROM vtx_players WHERE discord_id = %s", (discord_id,))
-
-        if not player or not player["game_username"]:
+        if not has_ign:
+            # Need IGN — send modal IMMEDIATELY as initial response (within 3s)
             modal = IGNModal(event_id=ev["id"])
             try:
                 await interaction.response.send_modal(modal)
@@ -307,11 +307,27 @@ class RegisterView(ui.View):
                 logger.debug("IGNModal send_modal failed — interaction expired", exc_info=True)
                 return
             except discord.InteractionResponded:
-                # Already responded (e.g. deferred) — can't show modal
                 await _safe_ephemeral(interaction, "⚠️ Please try again — interaction timed out.")
                 return
             await modal.wait()
             ign = modal.result or username
+            # Now do the slower checks after modal
+            entry = check_event_entry(ev["id"], discord_id)
+            if not entry["ok"]:
+                await _safe_ephemeral(interaction, f"🚫 {entry['reason']}")
+                return
+            existing = query_one(
+                "SELECT * FROM vtx_registrations WHERE event_id = %s AND discord_id = %s",
+                (ev["id"], discord_id),
+            )
+            if existing and existing["status"] == "confirmed":
+                await _safe_ephemeral(interaction, "You are already registered.")
+                return
+            upsert_player(discord_id, username)
+            execute(
+                "UPDATE vtx_players SET game_username = %s WHERE discord_id = %s",
+                (ign, discord_id),
+            )
             try:
                 await interaction.followup.send(
                     "⚠️ Changing your in-game name later will require running the `/change-ign` command.",
@@ -320,19 +336,31 @@ class RegisterView(ui.View):
             except Exception:
                 logger.debug("followup hint failed", exc_info=True)
         else:
-            ign = player["game_username"]
+            # Has IGN — defer and do all checks
             try:
-                await interaction.response.defer()
+                await interaction.response.defer(ephemeral=True)
             except discord.NotFound:
                 logger.debug("defer failed — interaction expired", exc_info=True)
-                # try followup defer fallback
-                try:
-                    await interaction.followup.send("Processing...", ephemeral=True)
-                except Exception:
-                    pass
+                return
             except Exception:
                 pass
 
+            entry = check_event_entry(ev["id"], discord_id)
+            if not entry["ok"]:
+                await _safe_ephemeral(interaction, f"🚫 {entry['reason']}")
+                return
+            existing = query_one(
+                "SELECT * FROM vtx_registrations WHERE event_id = %s AND discord_id = %s",
+                (ev["id"], discord_id),
+            )
+            if existing and existing["status"] == "confirmed":
+                await _safe_ephemeral(interaction, "You are already registered.")
+                return
+
+            upsert_player(discord_id, username)
+            ign = player["game_username"]
+
+        # Register the user
         if existing:
             execute(
                 "UPDATE vtx_registrations SET username = %s, team_members = NULL, "

@@ -108,13 +108,14 @@
                         {% for r in registrations %}
                         {% set ign = ign_map.get(r.discord_id, '') %}
                         {% set qualified = r.discord_id in qualifiers %}
-                        <tr>
+                        <tr data-discord="{{ r.discord_id }}">
                             <td>{{ loop.index }}</td>
                             <td>{{ r.username }}</td>
                             <td>{{ ign or '-' }}</td>
                             <td>{{ r.discord_id }}</td>
                             <td>
                                 <button class="btn btn-sm ajax-qualify{% if qualified %} btn-warning{% else %} btn-secondary{% endif %}" data-discord="{{ r.discord_id }}" data-qualified="{{ 1 if qualified else 0 }}">{% if qualified %}⭐ Qualified{% else %}⭐ Qualify{% endif %}</button>
+                                <button class="btn btn-sm btn-primary opt-kill" data-discord="{{ r.discord_id }}" data-game="1" title="+Kill">+K</button>
                             </td>
                         </tr>
                         {% endfor %}
@@ -261,18 +262,25 @@
         <div id="tab-leaderboard" class="tab-content">
             {% if event.team_size == 1 %}
             <div class="card">
-                <h2>Solo Leaderboard</h2>
+                <h2>Solo Leaderboard — optimistic</h2>
+                <p style="font-size:12px;color:#666">Click +Kill / +Win to update instantly (optimistic). Game #<span id="opt-game-num">1</span> <input id="opt-game-input" type="number" value="1" min="1" style="width:60px;padding:4px;border:1px solid #ccc;border-radius:4px"></p>
                 {% if solo_board %}
                 <table>
-                    <thead><tr><th>#</th><th>Player</th><th>Points</th><th>Kills</th></tr></thead>
+                    <thead><tr><th>#</th><th>Player</th><th>Points</th><th>Kills</th><th>Quick</th></tr></thead>
                     <tbody>
                         {% for row in solo_board %}
                         {% set ign = ign_map.get(row.discord_id, '') %}
-                        <tr{% if row.is_dq %} class="dq-row"{% endif %}>
+                        <tr data-discord="{{ row.discord_id }}"{% if row.is_dq %} class="dq-row"{% endif %}>
                             <td>{{ loop.index }}</td>
-                            <td{% if row.is_dq %} style="text-decoration:line-through"{% endif %}>{{ row.username }}{% if ign %} [{{ ign }}]{% endif %}{% if row.is_dq %} DQ{% endif %}</td>
+                            <td{% if row.is_dq %} style="text-decoration:line-through"{% endif %}>{{ row.username }}{% if ign %} [{{ ign }}]{% endif %}{% if row.is_dq %} DQ{% endif %} <span data-badge="{{ row.discord_id }}" style="font-size:10px;color:#999"></span></td>
                             <td>{% if row.is_dq %}DQ{% else %}{{ row.total_points }}{% endif %}</td>
                             <td>{% if row.is_dq %}DQ{% else %}{{ row.total_kills }}{% endif %}</td>
+                            <td>
+                                <button class="btn btn-sm btn-primary opt-kill" data-discord="{{ row.discord_id }}" data-game="1" title="+1 kill">+Kill</button>
+                                <button class="btn btn-sm btn-success opt-win" data-discord="{{ row.discord_id }}" data-game="1" title="+1 win">+Win</button>
+                                <button class="btn btn-sm btn-secondary opt-add-point" data-discord="{{ row.discord_id }}" data-points="5" title="+5 pts">+5</button>
+                                <button class="btn btn-sm btn-danger opt-dq" data-discord="{{ row.discord_id }}" title="DQ">DQ</button>
+                            </td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -283,23 +291,29 @@
             </div>
             {% else %}
             <div class="card">
-                <h2>Team Leaderboard</h2>
+                <h2>Team Leaderboard — optimistic</h2>
+                <p style="font-size:12px;color:#666">Team actions apply to lead; Game #<span class="opt-game-num">1</span></p>
                 {% if team_board %}
                 <table>
-                    <thead><tr><th>#</th><th>Players</th><th>Points</th><th>Kills</th></tr></thead>
+                    <thead><tr><th>#</th><th>Players</th><th>Points</th><th>Kills</th><th>Quick</th></tr></thead>
                     <tbody>
                         {% for row in team_board %}
                         {% set lead_ign = ign_map.get(row.lead_id, '') %}
-                        <tr{% if row.is_dq %} class="dq-row"{% endif %}>
+                        <tr data-discord="{{ row.lead_id }}"{% if row.is_dq %} class="dq-row"{% endif %}>
                             <td>{{ loop.index }}</td>
                             <td{% if row.is_dq %} style="text-decoration:line-through"{% endif %}>
                                 {{ row.team_name }} {% if lead_ign %}[{{ lead_ign }}]{% endif %}
                                 {% if row.team_members %}
                                     , {% for mid in row.team_members.split(',') %}{% set m_name = player_map.get(mid, mid) %}{% set m_ign = ign_map.get(mid, '') %}{{ m_name }}{% if m_ign %} [{{ m_ign }}]{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
-                                {% endif %}{% if row.is_dq %} DQ{% endif %}
+                                {% endif %}{% if row.is_dq %} DQ{% endif %} <span data-badge="{{ row.lead_id }}" style="font-size:10px;color:#999"></span>
                             </td>
                             <td>{% if row.is_dq %}DQ{% else %}{{ row.total_points }}{% endif %}</td>
                             <td>{% if row.is_dq %}DQ{% else %}{{ row.total_kills }}{% endif %}</td>
+                            <td>
+                                <button class="btn btn-sm btn-primary opt-kill" data-discord="{{ row.lead_id }}" data-game="1">+Kill</button>
+                                <button class="btn btn-sm btn-success opt-win" data-discord="{{ row.lead_id }}" data-game="1">+Win</button>
+                                <button class="btn btn-sm btn-danger opt-dq" data-discord="{{ row.lead_id }}">DQ</button>
+                            </td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -313,8 +327,10 @@
 
     </div>
 
+    <link rel="stylesheet" href="/static/optimistic.css">
     <script>
     var EVENT_ID = {{ event.id }};
+    window.EVENT_ID = EVENT_ID;
 
     $('.tab-btn').on('click', function() {
         var tab = $(this).data('tab');
@@ -384,6 +400,14 @@
             alert(msg);
         });
     });
+
+    // Keep game number in sync for all optimistic buttons
+    $('#opt-game-input').on('input change', function() {
+        var v = $(this).val() || '1';
+        $('.opt-game-num').text(v);
+        $('.opt-kill, .opt-win, .opt-elim').attr('data-game', v);
+    });
     </script>
+    <script src="/static/optimistic.js"></script>
 </body>
 </html>
