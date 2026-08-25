@@ -837,9 +837,9 @@ class RegistrationHandler(commands.Cog):
             "BANNED": "🚫 One or more players in this team are banned from registering.",
             "WRONG_MEMBER_COUNT": (
                 f"Wrong mention count — {team_label(ev['team_size'])} needs exactly "
-                f"{result['need']} mentions, got {result['got']}. "
+                f"{result.get('need', '?')} mentions, got {result.get('got', '?')}. "
                 f"Example: `{team_signup_format(ev['team_size'])}`. "
-                f"Solo? Mention yourself {result['need']} times instead."
+                f"Solo? Mention yourself {result.get('need', '?')} times instead."
             ),
             "DUPLICATE": (
                 "❌ You mentioned the same player more than once. "
