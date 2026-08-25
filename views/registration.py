@@ -766,12 +766,12 @@ class RegistrationHandler(commands.Cog):
         )
 
     async def _try_message_signup(self, message: discord.Message) -> bool:
-        """Message-based team signups: `@you @t1 @t2 SkinName` while registration is open.
+        """Message-based signups: solo `@player` or team `@you @t1 ... SkinName` while registration is open.
 
-        Strictly anchored: the whole message must be exactly ``team_size``
-        mentions (you first, then your teammates) plus the skin. Restricted to
-        channels that have an open team event. Teammates are resolved from the
-        guild cache, falling back to ``fetch_user`` for users not in the cache.
+        Solo: single @mention (any user) + optional skin → registers that user.
+        Team: exactly ``team_size`` mentions (you first) + optional skin → registers team.
+        Restricted to channels that have an open event. Teammates are resolved from
+        guild cache, falling back to ``fetch_user``.
 
         Returns True when the message belonged to this flow (parsed, validated,
         and answered) — the caller should not fall through to the legacy flows.
@@ -779,7 +779,7 @@ class RegistrationHandler(commands.Cog):
         if message.guild is None:
             return False
         ev = query_one(
-            "SELECT * FROM vtx_events WHERE status = 'registration' AND team_size >= 2 "
+            "SELECT * FROM vtx_events WHERE status = 'registration' AND team_size >= 1 "
             "AND (signup_channel_id = %s OR (signup_channel_id IS NULL AND channel_id = %s)) "
             "ORDER BY id DESC LIMIT 1",
             (str(message.channel.id), str(message.channel.id)),
@@ -805,13 +805,21 @@ class RegistrationHandler(commands.Cog):
             if not user.bot:
                 members.append((str(user.id), user.name))
 
-        if not members or members[0][0] != str(message.author.id):
-            await message.add_reaction("❌")
-            await message.channel.send(
-                "❌ Start with **your own** mention first, e.g. "
-                f"`{team_signup_format(ev['team_size'])}`."
-            )
-            return True
+        # Solo: any single @mention registers that user (author can register others)
+        # Team: first mention must be the author
+        if ev["team_size"] == 1:
+            if not members:
+                await message.add_reaction("❌")
+                await message.channel.send("❌ Mention a player to register, e.g. `@player`.")
+                return True
+        else:
+            if not members or members[0][0] != str(message.author.id):
+                await message.add_reaction("❌")
+                await message.channel.send(
+                    "❌ Start with **your own** mention first, e.g. "
+                    f"`{team_signup_format(ev['team_size'])}`."
+                )
+                return True
 
         result = register_team(
             ev,
